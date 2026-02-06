@@ -1,0 +1,18 @@
+# Build artifacts
+build/
+binaries/
+
+# Large disassembly/listing files (generate locally with Ghidra)
+*.txt.tool
+*_listing.txt
+*.bin.txt
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
