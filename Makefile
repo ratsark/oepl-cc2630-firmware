@@ -12,10 +12,10 @@ LD = $(TOOLCHAIN_PREFIX)ld
 OBJCOPY = $(TOOLCHAIN_PREFIX)objcopy
 SIZE = $(TOOLCHAIN_PREFIX)size
 
-# TI SimpleLink SDK paths
-SDK_ROOT ?= $(HOME)/Code/ti/simplelink_cc13xx_cc26xx_sdk_8_32_00_07
-DRIVERLIB = $(SDK_ROOT)/source/ti/devices/cc13x1_cc26x1/driverlib
-DEVICE_DIR = $(SDK_ROOT)/source/ti/devices/cc13x1_cc26x1
+# CC26x0 driverlib paths (correct for CC2630)
+CC26X0_DIR ?= $(HOME)/Code/ti/cc26x0
+CC26X0_DRIVERLIB = $(CC26X0_DIR)/driverlib
+CC26X0_INC = $(CC26X0_DIR)/inc
 
 # Directories
 FIRMWARE_DIR = firmware
@@ -31,14 +31,19 @@ DEVICE = CC2630F128
 SOURCES = \
 	$(FIRMWARE_DIR)/startup_cc2630.c \
 	$(FIRMWARE_DIR)/ccfg.c \
-	$(FIRMWARE_DIR)/main.c \
-	$(FIRMWARE_DIR)/oepl_app.c \
-	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
-	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
-	$(FIRMWARE_DIR)/oepl_nvm_cc2630.c \
-	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
-	$(DRIVERS_DIR)/oepl_display_driver_common_cc2630.c \
-	$(FIRMWARE_DIR)/oepl_compression.c
+	$(FIRMWARE_DIR)/rtt.c \
+	$(FIRMWARE_DIR)/oepl_rf_cc2630.c \
+	$(FIRMWARE_DIR)/main.c
+
+# Full source list (uncomment when ready for full build):
+#SOURCES += \
+#	$(FIRMWARE_DIR)/oepl_app.c \
+#	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
+#	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
+#	$(FIRMWARE_DIR)/oepl_nvm_cc2630.c \
+#	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
+#	$(DRIVERS_DIR)/oepl_display_driver_common_cc2630.c \
+#	$(FIRMWARE_DIR)/oepl_compression.c
 
 # Include paths
 INCLUDES = \
@@ -46,18 +51,14 @@ INCLUDES = \
 	-I$(DRIVERS_DIR) \
 	-I$(CONFIG_DIR) \
 	-I$(FIRMWARE_DIR)/shared \
-	-I$(DRIVERLIB) \
-	-I$(DEVICE_DIR) \
-	-I$(SDK_ROOT)/source \
-	-I$(SDK_ROOT)/kernel/tirtos/packages
+	-I$(CC26X0_INC) \
+	-I$(CC26X0_DRIVERLIB)
 
 # Defines
 DEFINES = \
-	-DDeviceFamily_CC26X1 \
 	-DCC2630 \
 	-DOEPL_TARGET_CC2630 \
-	-DOEPL_DISPLAY_UC8159_600X448 \
-	-DSIMPLELINK_SDK_AVAILABLE
+	-DOEPL_DISPLAY_UC8159_600X448
 
 # Compiler flags
 CFLAGS = \
@@ -103,9 +104,7 @@ LDFLAGS = \
 
 # Libraries
 LIBS = \
-	$(DRIVERLIB)/bin/gcc/driverlib.lib \
-	-lm \
-	-lc \
+	$(CC26X0_DRIVERLIB)/bin/gcc/driverlib.lib \
 	-lgcc \
 	-lnosys
 
@@ -159,12 +158,22 @@ size: $(BUILD_DIR)/$(PROJECT).elf
 	@echo ""
 
 # Program via UART bootloader
-# Note: D/L pin on RPi GPIO 17 must be pulled low first
+# Automates D/L pin control via RPi GPIO 17
 SERIAL_PORT ?= /dev/ttyUSB0
+BSL_TOOL ?= python3 $(HOME)/Code/cc2538-bsl/cc2538_bsl/cc2538_bsl.py
+DL_PIN_SCRIPT = tools/dl_pin.sh
+
 program: $(BIN_DIR)/$(PROJECT).bin
-	@echo "Programming via UART bootloader..."
-	@echo "Make sure D/L pin (RPi GPIO 17) is LOW for bootloader entry"
-	cc2538-bsl -p $(SERIAL_PORT) -e -w -v $<
+	@echo "=== Programming via UART bootloader ==="
+	@echo "Step 1: Pull D/L pin LOW (enter bootloader on next reset)..."
+	@bash $(DL_PIN_SCRIPT) low
+	@sleep 0.5
+	@echo "Step 2: Flashing firmware..."
+	$(BSL_TOOL) -p $(SERIAL_PORT) -e -w -v $<
+	@echo "Step 3: Release D/L pin (normal boot)..."
+	@bash $(DL_PIN_SCRIPT) high
+	@echo "=== Done! Device should now boot the new firmware ==="
+	@echo "Connect serial terminal: screen $(SERIAL_PORT) 115200"
 
 # Program via JTAG (OpenOCD + J-Link)
 jtag-flash: $(BIN_DIR)/$(PROJECT).bin

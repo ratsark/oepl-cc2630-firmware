@@ -2,37 +2,50 @@
 # Control the D/L (Download) pin on the TG-GR6000N via Raspberry Pi GPIO 17
 #
 # The D/L pin controls bootloader entry on the CC2630:
-#   LOW  = Enter UART bootloader on next power cycle
+#   LOW  = Enter UART bootloader on next power cycle/reset
 #   HIGH = Boot application normally
+#
+# Uses libgpiod (gpioset/gpioget) which works on RPi 5.
 #
 # Usage:
 #   ./dl_pin.sh low    # Pull D/L low (bootloader mode)
 #   ./dl_pin.sh high   # Release D/L high (normal boot)
 #   ./dl_pin.sh status # Show current state
 
+GPIO_CHIP="gpiochip0"
 GPIO_PIN=17
-GPIO_PATH="/sys/class/gpio/gpio${GPIO_PIN}"
-
-# Export GPIO if not already
-if [ ! -d "$GPIO_PATH" ]; then
-    echo "$GPIO_PIN" > /sys/class/gpio/export 2>/dev/null
-    sleep 0.1
-fi
 
 case "$1" in
     low)
-        echo "out" > "$GPIO_PATH/direction"
-        echo "0" > "$GPIO_PATH/value"
-        echo "D/L pin LOW - device will enter bootloader on next power cycle"
+        # Drive D/L pin low - CC2630 will enter bootloader on next reset
+        gpioset -c "$GPIO_CHIP" "$GPIO_PIN"=0 &
+        GPIOSET_PID=$!
+        echo "$GPIOSET_PID" > /tmp/dl_pin_gpioset.pid
+        echo "D/L pin LOW (PID $GPIOSET_PID) - device will enter bootloader on reset"
         ;;
     high)
-        echo "in" > "$GPIO_PATH/direction"
-        echo "D/L pin released (high-Z/pulled up) - device will boot normally"
+        # Release D/L pin (kill the gpioset process to release the line)
+        if [ -f /tmp/dl_pin_gpioset.pid ]; then
+            PID=$(cat /tmp/dl_pin_gpioset.pid)
+            kill "$PID" 2>/dev/null
+            rm -f /tmp/dl_pin_gpioset.pid
+            echo "D/L pin released (was PID $PID) - device will boot normally"
+        else
+            echo "D/L pin not actively driven (no gpioset process found)"
+        fi
         ;;
     status)
-        dir=$(cat "$GPIO_PATH/direction" 2>/dev/null)
-        val=$(cat "$GPIO_PATH/value" 2>/dev/null)
-        echo "GPIO $GPIO_PIN: direction=$dir value=$val"
+        if [ -f /tmp/dl_pin_gpioset.pid ]; then
+            PID=$(cat /tmp/dl_pin_gpioset.pid)
+            if kill -0 "$PID" 2>/dev/null; then
+                echo "GPIO $GPIO_PIN: actively driven LOW (PID $PID)"
+            else
+                rm -f /tmp/dl_pin_gpioset.pid
+                echo "GPIO $GPIO_PIN: not driven (stale PID file cleaned up)"
+            fi
+        else
+            echo "GPIO $GPIO_PIN: not driven"
+        fi
         ;;
     *)
         echo "Usage: $0 {low|high|status}"
