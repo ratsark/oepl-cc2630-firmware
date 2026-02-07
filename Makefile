@@ -33,6 +33,7 @@ SOURCES = \
 	$(FIRMWARE_DIR)/ccfg.c \
 	$(FIRMWARE_DIR)/rtt.c \
 	$(FIRMWARE_DIR)/oepl_rf_cc2630.c \
+	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
 	$(FIRMWARE_DIR)/main.c
 
 # Full source list (uncomment when ready for full build):

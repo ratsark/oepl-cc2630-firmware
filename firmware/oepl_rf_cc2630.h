@@ -43,6 +43,9 @@ uint8_t *oepl_rf_rx_get(uint8_t *out_len, int8_t *out_rssi);
 // Release the current RX entry so it can be reused
 void oepl_rf_rx_flush(void);
 
+// Get RX command status (for diagnostics)
+uint16_t oepl_rf_rx_status(void);
+
 // Power down the RF core
 void oepl_rf_shutdown(void);
 

@@ -1,6 +1,7 @@
 // -----------------------------------------------------------------------------
 //  CC2630 RF Core Driver for OEPL
 //  Bare-metal IEEE 802.15.4 radio using TI driverlib
+//  Init sequence follows Contiki-NG ieee-mode.c (proven working)
 // -----------------------------------------------------------------------------
 
 #include "oepl_rf_cc2630.h"
@@ -20,35 +21,30 @@
 #include "hw_memmap.h"
 #include "osc.h"
 
-// CC2630 RF core patches for IEEE 802.15.4 (required for PG2.x)
-#define PATCH_FUN_SPEC static inline
-#include "rf_patches/rf_patch_cpe_ieee.h"
-#include "rf_patches/rf_patch_mce_ieee_s.h"
-#include "rf_patches/rf_patch_rfe_ieee.h"
-
 // FCFG1 IEEE MAC address registers
-// FCFG1 base = 0x50001000, MAC_15_4_0 offset = 0x2F0, MAC_15_4_1 offset = 0x2F4
 #define FCFG1_MAC_15_4_0    (*(volatile uint32_t *)0x500012F0)
 #define FCFG1_MAC_15_4_1    (*(volatile uint32_t *)0x500012F4)
 
 // OEPL channel map: 6 channels -> IEEE 802.15.4 channels
 const uint8_t oepl_channel_map[OEPL_NUM_CHANNELS] = {11, 15, 20, 25, 26, 27};
 
-// RF overrides for IEEE 802.15.4 2.4 GHz (CC2630 PG2.3)
-// From Contiki OS ieee-mode.c - tested configuration for CC26x0
+// IEEE 802.15.4 overrides from Contiki-NG smartrf-settings.c
 static uint32_t rf_overrides[] = {
-    0x00354038,  /* Synth: Set RTRIM (POTAILRESTRIM) to 5 */
-    0x4001402D,  /* Synth: Correct CKVD latency setting (address) */
-    0x00608402,  /* Synth: Correct CKVD latency setting (value) */
-    0x000784A3,  /* Synth: Set FREF = 3.43 MHz (24 MHz / 7) */
-    0xA47E0583,  /* Synth: Set loop bandwidth after lock to 80 kHz (K2) */
-    0xEAE00603,  /* Synth: Set loop bandwidth after lock to 80 kHz (K3, LSB) */
-    0x00010623,  /* Synth: Set loop bandwidth after lock to 80 kHz (K3, MSB) */
-    0x002B50DC,  /* Adjust AGC DC filter */
-    0x05000243,  /* Increase synth programming timeout */
-    0x002082C3,  /* Increase synth programming timeout */
+    0x00354038,   // Synth: Set RTRIM (POTAILRESTRIM) to 5
+    0x4001402D,   // Synth: Correct CKVD latency setting (address)
+    0x00608402,   // Synth: Correct CKVD latency setting (value)
+    0x000784A3,   // Synth: Set FREF = 3.43 MHz (24 MHz / 7)
+    0xA47E0583,   // Synth: Set loop bandwidth after lock to 80 kHz (K2)
+    0xEAE00603,   // Synth: Set loop bandwidth after lock to 80 kHz (K3, LSB)
+    0x00010623,   // Synth: Set loop bandwidth after lock to 80 kHz (K3, MSB)
+    0x002B50DC,   // Adjust AGC DC filter
+    0x05000243,   // Increase synth programming timeout
+    0x002082C3,   // Increase synth programming timeout
     END_OVERRIDE
 };
+
+// CPE interrupt mask (matches Contiki-NG)
+#define RF_CPE_IRQ_BASE  (IRQ_RX_ENTRY_DONE | IRQ_INTERNAL_ERROR | IRQ_RX_BUF_FULL)
 
 // --- Static command structures (persist in RAM for RF core access) ---
 static rfc_CMD_RADIO_SETUP_t rf_cmd_setup;
@@ -97,11 +93,20 @@ static rf_status_t rf_send_cmd(uint32_t cmd_ptr)
 
 static rf_status_t rf_wait_cmd_done(volatile uint16_t *status_ptr, uint32_t timeout_loops)
 {
+    // Status field bits [11:10]:
+    //   00 = running (IDLE/PENDING/ACTIVE)
+    //   01 = done normally (DONE_OK=0x0400, IEEE_DONE_OK=0x2400, etc.)
+    //   10 = error
+    // Use masked comparison so both generic and IEEE-specific statuses work.
     for (volatile uint32_t i = 0; i < timeout_loops; i++) {
         uint16_t s = *status_ptr;
-        if (s >= DONE_OK) {
-            if (s == DONE_OK) return RF_OK;
-            rtt_puts("RF cmd status=0x");
+        if ((s & 0x0C00) == 0x0400) {
+            // Done normally (includes DONE_OK, IEEE_DONE_OK, IEEE_DONE_ACK, etc.)
+            return RF_OK;
+        }
+        if ((s & 0x0C00) == 0x0800) {
+            // Error
+            rtt_puts("RF cmd err=0x");
             rtt_put_hex8((s >> 8) & 0xFF);
             rtt_put_hex8(s & 0xFF);
             rtt_puts("\r\n");
@@ -118,24 +123,29 @@ static rf_status_t rf_wait_cmd_done(volatile uint16_t *status_ptr, uint32_t time
 
 rf_status_t oepl_rf_init(void)
 {
+    // === Contiki-NG proven init sequence for CC26x0 IEEE 802.15.4 ===
+
     // 1. Switch to XOSC_HF - RF synth needs crystal oscillator as reference
     OSCHF_TurnOnXosc();
     for (volatile uint32_t i = 0; i < 1000000; i++) {
         if (OSCHF_AttemptToSwitchToXosc()) break;
     }
-    // If already on XOSC or switch succeeded, we're good
-    // Check current source to verify
     if (OSCClockSourceGet(OSC_SRC_CLK_HF) != OSC_XOSC_HF) {
         rtt_puts("RF: XOSC_HF FAIL\r\n");
         return RF_ERR_POWER;
     }
 
-    // 2. Power cycle RF core for clean state
+    // 2. Power off RF core first (RFCMODESEL must be set while powered off)
     PRCMPowerDomainOff(PRCM_DOMAIN_RFCORE);
     for (volatile uint32_t i = 0; i < 100000; i++) {
         if (PRCMPowerDomainStatus(PRCM_DOMAIN_RFCORE) == PRCM_DOMAIN_POWER_OFF)
             break;
     }
+
+    // 3. Set RFCMODESEL = MODE2 for IEEE 802.15.4
+    HWREG(PRCM_BASE + 0x1D0) = 0x02;
+
+    // 4. Power on RF core
     PRCMPowerDomainOn(PRCM_DOMAIN_RFCORE);
     for (volatile uint32_t i = 0; i < 500000; i++) {
         if (PRCMPowerDomainStatus(PRCM_DOMAIN_RFCORE) == PRCM_DOMAIN_POWER_ON)
@@ -146,32 +156,62 @@ rf_status_t oepl_rf_init(void)
         return RF_ERR_POWER;
     }
 
-    // 3. Enable clocks
+    // 5. Enable RF core clocks (Contiki-NG: RF_CORE_CLOCKS_MASK)
     PRCMDomainEnable(PRCM_DOMAIN_RFCORE);
     PRCMLoadSet();
     while (!PRCMLoadGet()) {}
+    // Enable all RF core submodule clocks
     HWREG(RFC_PWR_NONBUF_BASE + RFC_PWR_O_PWMCLKEN) = 0x7FF;
 
-    // 4. Clear IRQ flags, wait for boot, apply CPE patch
+    // 6. Clear interrupts, wait for CPE boot
     HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0x0;
     HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) = 0x0;
-    RFCAckIntClear();
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG) = 0;
     rf_wait_boot();
-    rf_patch_cpe_ieee();
+    rtt_puts("RF: boot OK\r\n");
 
-    // 5. Verify RF core is alive
+    // 7. Enable additional clocks via RF_CMD0 (Contiki-NG rf_core_power_up)
+    //    0x0607 with MDMRAM|RFERAM enables modem RAM + RFE RAM clocks
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG) = 0;
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_CMDR) =
+        CMDR_DIR_CMD_2BYTE(0x0607,
+            RFC_PWR_PWMCLKEN_MDMRAM_M | RFC_PWR_PWMCLKEN_RFERAM_M);
+    // Wait for ACK
+    for (volatile uint32_t i = 0; i < 100000; i++) {
+        if (HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG)) break;
+    }
+
+    // 8. Verify RF core is alive
     uint32_t cmdsta = RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_PING));
     if ((cmdsta & 0xFF) != CMDSTA_Done) {
         rtt_puts("RF: PING FAIL\r\n");
         return RF_ERR_BOOT;
     }
 
-    // 6. Configure analog: bus request, VCO LDO, RTRIM
-    RFCDoorbellSendTo(CMDR_DIR_CMD_1BYTE(CMD_BUS_REQUEST, 1));
-    RFCAdi3VcoLdoVoltageMode(true);
+    // 9. Start Radio Timer (RAT) — direct command, needed for FG scheduling
+    rtt_puts("RF: RAT...");
+    cmdsta = RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_START_RAT));
+    rtt_puts("sta=0x");
+    rtt_put_hex8(cmdsta & 0xFF);
+    rtt_puts("\r\n");
 
+    // 10. Configure CPE interrupt enables (Contiki-NG rf_core_setup_interrupts)
+    //     Route ERROR_IRQ to CPE1
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEISL) =
+        IRQ_INTERNAL_ERROR | IRQ_RX_BUF_FULL;
+    //     Enable base interrupts
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) = RF_CPE_IRQ_BASE;
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0x0;
+
+    // 11. CMD_RADIO_SETUP (IEEE 802.15.4 mode, no patches needed — ROM has IEEE)
+    //     NOTE: No RFCAdi3VcoLdoVoltageMode — that's for prop-mode only
     memset(&rf_cmd_setup, 0, sizeof(rf_cmd_setup));
     rf_cmd_setup.commandNo = CMD_RADIO_SETUP;
+    rf_cmd_setup.status = IDLE;
+    rf_cmd_setup.pNextOp = NULL;
+    rf_cmd_setup.startTime = 0;
+    rf_cmd_setup.startTrigger.triggerType = TRIG_NOW;
+    rf_cmd_setup.condition.rule = COND_NEVER;
     rf_cmd_setup.mode = 0x01;                    // IEEE 802.15.4
     rf_cmd_setup.config.frontEndMode = 0x00;     // Differential
     rf_cmd_setup.config.biasMode = 0x00;         // Internal bias
@@ -179,17 +219,8 @@ rf_status_t oepl_rf_init(void)
     rf_cmd_setup.config.bNoFsPowerUp = 0;        // Power up FS
     rf_cmd_setup.txPower = 0x9330;               // 5 dBm
     rf_cmd_setup.pRegOverride = rf_overrides;
-    RFCRTrim((rfc_radioOp_t *)&rf_cmd_setup);
 
-    // 7. Send CMD_RADIO_SETUP
-    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0x0;
-    rf_cmd_setup.status = IDLE;
-    rf_cmd_setup.pNextOp = NULL;
-    rf_cmd_setup.startTime = 0;
-    rf_cmd_setup.startTrigger.triggerType = TRIG_NOW;
-    rf_cmd_setup.condition.rule = COND_NEVER;
-
-    rtt_puts("RF: init...");
+    rtt_puts("RF: SETUP...");
     if (rf_send_cmd((uint32_t)&rf_cmd_setup) != RF_OK) return RF_ERR_SETUP;
     if (rf_wait_cmd_done(&rf_cmd_setup.status, 1000000) != RF_OK) {
         rtt_puts("FAIL\r\n");
@@ -197,7 +228,7 @@ rf_status_t oepl_rf_init(void)
     }
     rtt_puts("OK\r\n");
 
-    // 8. Set up RX data queue (single entry, circular)
+    // 12. Set up RX data queue (single entry, circular)
     memset(rx_buf, 0, sizeof(rx_buf));
     rx_entry->pNextEntry = (uint8_t *)rx_entry;
     rx_entry->status = DATA_ENTRY_PENDING;
@@ -259,7 +290,21 @@ rf_status_t oepl_rf_tx(const uint8_t *payload, uint8_t len)
 {
     if (len > sizeof(tx_buf)) return RF_ERR_TX;
 
+    // Wait for CMD_IEEE_RX to be ACTIVE (required background for FG TX)
+    for (volatile uint32_t i = 0; i < 200000; i++) {
+        if (*(volatile uint16_t *)&rf_cmd_rx.status == ACTIVE) break;
+    }
+    if (*(volatile uint16_t *)&rf_cmd_rx.status != ACTIVE) {
+        rtt_puts("RF: RX not active for TX\r\n");
+        return RF_ERR_TX;
+    }
+
     memcpy(tx_buf, payload, len);
+
+    // Enable IRQ_LAST_FG_COMMAND_DONE for TX (Contiki-NG rf_core_cmd_done_en)
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0;
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) =
+        RF_CPE_IRQ_BASE | IRQ_LAST_FG_COMMAND_DONE;
 
     memset(&rf_cmd_tx, 0, sizeof(rf_cmd_tx));
     rf_cmd_tx.commandNo = CMD_IEEE_TX;
@@ -268,21 +313,46 @@ rf_status_t oepl_rf_tx(const uint8_t *payload, uint8_t len)
     rf_cmd_tx.startTime = 0;
     rf_cmd_tx.startTrigger.triggerType = TRIG_NOW;
     rf_cmd_tx.condition.rule = COND_NEVER;
-    rf_cmd_tx.txOpt.bIncludePhyHdr = 0;  // Auto PHY header
-    rf_cmd_tx.txOpt.bIncludeCrc = 0;     // Auto CRC
+    rf_cmd_tx.txOpt.bIncludePhyHdr = 0;
+    rf_cmd_tx.txOpt.bIncludeCrc = 0;
     rf_cmd_tx.payloadLen = len;
     rf_cmd_tx.pPayload = tx_buf;
 
-    rf_status_t rc = rf_send_cmd((uint32_t)&rf_cmd_tx);
-    if (rc != RF_OK) return RF_ERR_TX;
+    uint32_t cmdsta = RFCDoorbellSendTo((uint32_t)&rf_cmd_tx);
 
-    rc = rf_wait_cmd_done(&rf_cmd_tx.status, 500000);
-    if (rc != RF_OK) {
-        rtt_puts("RF: TX FAILED\r\n");
+    if ((cmdsta & 0xFF) != CMDSTA_Done) {
+        rtt_puts("RF: TX rejected sta=0x");
+        rtt_put_hex8(cmdsta & 0xFF);
+        rtt_puts("\r\n");
+        // Restore base IRQ mask
+        HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) = RF_CPE_IRQ_BASE;
         return RF_ERR_TX;
     }
 
-    return RF_OK;
+    // Wait for TX completion — poll both status field (volatile!) and RFCPEIFG
+    rf_status_t result = RF_ERR_TIMEOUT;
+    for (volatile uint32_t i = 0; i < 500000; i++) {
+        uint16_t s = *(volatile uint16_t *)&rf_cmd_tx.status;
+        if ((s & 0x0C00) == 0x0400) {
+            result = RF_OK;
+            break;
+        }
+        if ((s & 0x0C00) == 0x0800) {
+            result = RF_ERR_TX;
+            break;
+        }
+        // Also check interrupt flags as backup
+        uint32_t ifg = HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFCPEIFG);
+        if (ifg & IRQ_LAST_FG_COMMAND_DONE) {
+            result = RF_OK;
+            break;
+        }
+    }
+
+    // Restore base IRQ mask (Contiki-NG rf_core_cmd_done_dis)
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) = RF_CPE_IRQ_BASE;
+
+    return result;
 }
 
 rf_status_t oepl_rf_rx_start(uint8_t ieee_channel, uint32_t timeout_us)
@@ -326,6 +396,8 @@ rf_status_t oepl_rf_rx_start(uint8_t ieee_channel, uint32_t timeout_us)
     rf_cmd_rx.frameTypes.bAcceptFt6Reserved = 1;
     rf_cmd_rx.frameTypes.bAcceptFt7Reserved = 1;
 
+    // CCA configuration omitted for now — keep defaults (all disabled)
+
     // Use end trigger with timeout
     if (timeout_us > 0) {
         rf_cmd_rx.endTrigger.triggerType = TRIG_REL_START;
@@ -337,9 +409,33 @@ rf_status_t oepl_rf_rx_start(uint8_t ieee_channel, uint32_t timeout_us)
     }
 
     rf_status_t rc = rf_send_cmd((uint32_t)&rf_cmd_rx);
-    if (rc != RF_OK) return RF_ERR_RX;
+    if (rc != RF_OK) {
+        rtt_puts("RF: RX start FAIL\r\n");
+        return RF_ERR_RX;
+    }
+
+    // Wait for RX to become ACTIVE (may take many iterations after RAT start)
+    for (volatile uint32_t i = 0; i < 500000; i++) {
+        if (*(volatile uint16_t *)&rf_cmd_rx.status == ACTIVE) break;
+    }
+    volatile uint16_t s = *(volatile uint16_t *)&rf_cmd_rx.status;
+    rtt_puts("RF: RX s=0x");
+    rtt_put_hex8((s >> 8) & 0xFF);
+    rtt_put_hex8(s & 0xFF);
+
+    // Read RSSI to verify receiver is alive
+    uint32_t rssi_sta = RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_GET_RSSI));
+    int8_t rssi = (int8_t)((rssi_sta >> 16) & 0xFF);
+    rtt_puts(" rssi=");
+    rtt_put_hex8((uint8_t)rssi);
+    rtt_puts("\r\n");
 
     return RF_OK;
+}
+
+uint16_t oepl_rf_rx_status(void)
+{
+    return *(volatile uint16_t *)&rf_cmd_rx.status;
 }
 
 void oepl_rf_rx_stop(void)
@@ -353,7 +449,8 @@ void oepl_rf_rx_stop(void)
 
 uint8_t *oepl_rf_rx_get(uint8_t *out_len, int8_t *out_rssi)
 {
-    if (rx_entry->status != DATA_ENTRY_FINISHED) {
+    // Must use volatile read — RF core updates this from DMA
+    if (*(volatile uint8_t *)&rx_entry->status != DATA_ENTRY_FINISHED) {
         return NULL;
     }
 
@@ -378,7 +475,7 @@ uint8_t *oepl_rf_rx_get(uint8_t *out_len, int8_t *out_rssi)
 
 void oepl_rf_rx_flush(void)
 {
-    rx_entry->status = DATA_ENTRY_PENDING;
+    *(volatile uint8_t *)&rx_entry->status = DATA_ENTRY_PENDING;
 }
 
 void oepl_rf_shutdown(void)
@@ -404,18 +501,20 @@ void oepl_rf_shutdown(void)
 void oepl_rf_get_mac(uint8_t mac[8])
 {
     // Read 8-byte IEEE MAC from FCFG1
-    // FCFG1_MAC_15_4_1 contains the upper 4 bytes (MSB first in memory)
-    // FCFG1_MAC_15_4_0 contains the lower 4 bytes
+    // FCFG1_MAC_15_4_1 contains the upper 4 bytes, MAC_15_4_0 the lower
     uint32_t hi = FCFG1_MAC_15_4_1;
     uint32_t lo = FCFG1_MAC_15_4_0;
 
-    // Store in big-endian order (MSB first, as OEPL expects)
-    mac[0] = (hi >> 24) & 0xFF;
-    mac[1] = (hi >> 16) & 0xFF;
-    mac[2] = (hi >> 8) & 0xFF;
-    mac[3] = hi & 0xFF;
-    mac[4] = (lo >> 24) & 0xFF;
-    mac[5] = (lo >> 16) & 0xFF;
-    mac[6] = (lo >> 8) & 0xFF;
-    mac[7] = lo & 0xFF;
+    // IEEE 802.15.4 extended addresses are transmitted/stored LSB first.
+    // FCFG1 stores: hi = MSB..., lo = ...LSB
+    // So MAC value (MSB first) = hi:lo = 00:12:4B:00:18:18:80:B0
+    // In IEEE 802.15.4 frame format (LSB first): B0:80:18:18:00:4B:12:00
+    mac[0] = lo & 0xFF;         // LSB
+    mac[1] = (lo >> 8) & 0xFF;
+    mac[2] = (lo >> 16) & 0xFF;
+    mac[3] = (lo >> 24) & 0xFF;
+    mac[4] = hi & 0xFF;
+    mac[5] = (hi >> 8) & 0xFF;
+    mac[6] = (hi >> 16) & 0xFF;
+    mac[7] = (hi >> 24) & 0xFF;  // MSB
 }

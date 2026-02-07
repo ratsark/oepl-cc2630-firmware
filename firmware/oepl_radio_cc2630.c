@@ -1,297 +1,386 @@
 // -----------------------------------------------------------------------------
-//                                   Includes
+//  OEPL Protocol Layer for CC2630
+//  Builds IEEE 802.15.4 frames with OEPL payload, uses oepl_rf_cc2630 for TX/RX
+//
+//  IMPORTANT: CMD_IEEE_TX is a foreground command that requires CMD_IEEE_RX
+//  to be active as the background command. So the pattern is always:
+//    1. Start CMD_IEEE_RX (background)
+//    2. Send CMD_IEEE_TX (foreground, returns to RX after TX)
+//    3. Wait for response in RX queue
+//    4. Stop RX when done
 // -----------------------------------------------------------------------------
+
 #include "oepl_radio_cc2630.h"
-#include "oepl_hw_abstraction_cc2630.h"
+#include "oepl_rf_cc2630.h"
+#include "rtt.h"
+#include <string.h>
 
-// -----------------------------------------------------------------------------
-//                              Macros and Typedefs
-// -----------------------------------------------------------------------------
+// --- Static State ---
+static radio_state_t radio_st;
+static uint8_t tx_frame[64];
 
-// OEPL packet types (from protocol analysis)
-#define PKT_AVAIL_DATA_REQ      0x41
-#define PKT_AVAIL_DATA_INFO     0x42
-#define PKT_BLOCK_REQUEST       0x43
-#define PKT_BLOCK_DATA          0x44
-#define PKT_XFER_COMPLETE       0x45
+// --- Helpers ---
 
-// Radio state
-typedef enum {
-    RADIO_STATE_IDLE,
-    RADIO_STATE_TX,
-    RADIO_STATE_RX,
-    RADIO_STATE_SCANNING
-} radio_state_t;
+static void add_crc(void *p, uint8_t len)
+{
+    uint8_t total = 0;
+    for (uint8_t c = 1; c < len; c++)
+        total += ((uint8_t *)p)[c];
+    ((uint8_t *)p)[0] = total;
+}
 
-// -----------------------------------------------------------------------------
-//                                Static Variables
-// -----------------------------------------------------------------------------
-static radio_rx_callback_t rx_callback = NULL;
-static radio_state_t radio_state = RADIO_STATE_IDLE;
-static uint8_t current_channel = 0;
-static uint8_t mac_address[8];
+static bool check_crc(const void *p, uint8_t len)
+{
+    uint8_t total = 0;
+    for (uint8_t c = 1; c < len; c++)
+        total += ((const uint8_t *)p)[c];
+    return ((const uint8_t *)p)[0] == total;
+}
 
-// -----------------------------------------------------------------------------
-//                          Static Function Declarations
-// -----------------------------------------------------------------------------
-static void radio_configure_2_4ghz(void);
-static void radio_send_packet(const uint8_t* data, size_t len);
-static void radio_generate_mac_address(void);
+static void build_bcast_header(struct MacFrameBcast *f)
+{
+    f->fcs[0] = 0x21;  // Data frame, ACK request (matches OEPL reference)
+    f->fcs[1] = 0xC8;  // Short dst addr, long src addr, no PAN compress
+    f->seq = radio_st.seq++;
+    f->dstPan = PROTO_PAN_ID;
+    f->dstAddr = 0xFFFF;
+    f->srcPan = PROTO_PAN_ID;
+    memcpy(f->src, radio_st.mac, 8);
+}
 
-// -----------------------------------------------------------------------------
-//                          Public Function Definitions
-// -----------------------------------------------------------------------------
+static void build_unicast_header(struct MacFrameNormal *f, const uint8_t *dst_mac)
+{
+    f->fcs[0] = 0x41;
+    f->fcs[1] = 0xCC;
+    f->seq = radio_st.seq++;
+    f->pan = PROTO_PAN_ID;
+    memcpy(f->dst, dst_mac, 8);
+    memcpy(f->src, radio_st.mac, 8);
+}
+
+// Poll RX queue for a packet, with bounded wait
+// Returns pointer to received frame data, or NULL on timeout
+static uint8_t *wait_for_rx(uint32_t wait_loops, uint8_t *out_len, int8_t *out_rssi)
+{
+    for (volatile uint32_t w = 0; w < wait_loops; w++) {
+        uint8_t *pkt = oepl_rf_rx_get(out_len, out_rssi);
+        if (pkt) return pkt;
+    }
+    return NULL;
+}
+
+// --- Public API ---
 
 void oepl_radio_init(void)
 {
-    oepl_hw_debugprint(DBG_RADIO, "Initializing 2.4 GHz IEEE 802.15.4 radio...\n");
-
-    // Generate MAC address from chip ID
-    radio_generate_mac_address();
-
-    oepl_hw_debugprint(DBG_RADIO, "MAC: %02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
-                      mac_address[0], mac_address[1], mac_address[2], mac_address[3],
-                      mac_address[4], mac_address[5], mac_address[6], mac_address[7]);
-
-    // Configure radio for 900MHz proprietary mode
-    radio_configure_2_4ghz();
-
-    // Scan for best channel
-    int8_t best_channel = oepl_radio_scan_channels();
-    if (best_channel >= 0) {
-        oepl_radio_set_channel(best_channel);
-        oepl_hw_debugprint(DBG_RADIO, "Using channel: %d\n", best_channel);
-    } else {
-        // Default to channel 0
-        oepl_radio_set_channel(0);
-        oepl_hw_debugprint(DBG_RADIO, "No channel found, using default: 0\n");
-    }
-
-    radio_state = RADIO_STATE_IDLE;
-
-    oepl_hw_debugprint(DBG_RADIO, "Radio initialized\n");
-}
-
-void oepl_radio_set_rx_callback(radio_rx_callback_t callback)
-{
-    rx_callback = callback;
-}
-
-void oepl_radio_send_avail_data_req(void)
-{
-    oepl_hw_debugprint(DBG_RADIO, "Sending AvailDataReq...\n");
-
-    // Build AvailDataReq packet
-    // Format (from CC2630 OEPL analysis):
-    // [PKT_TYPE] [MAC_ADDR(8)] [HWID] [BATT_MV(2)] [TEMP] [FLAGS]
-
-    uint8_t packet[16];
-    size_t offset = 0;
-
-    // Packet type
-    packet[offset++] = PKT_AVAIL_DATA_REQ;
-
-    // MAC address
-    for (size_t i = 0; i < 8; i++) {
-        packet[offset++] = mac_address[i];
-    }
-
-    // Hardware ID
-    packet[offset++] = oepl_hw_get_hwid();
-
-    // Battery voltage
-    uint16_t voltage_mv = 0;
-    oepl_hw_get_voltage(&voltage_mv);
-    packet[offset++] = (voltage_mv >> 8) & 0xFF;
-    packet[offset++] = voltage_mv & 0xFF;
-
-    // Temperature
-    int8_t temp_degc = 0;
-    oepl_hw_get_temperature(&temp_degc);
-    packet[offset++] = (uint8_t)temp_degc;
-
-    // Flags (TODO: define properly)
-    packet[offset++] = 0x00;
-
-    // Send packet
-    radio_send_packet(packet, offset);
-
-    oepl_hw_debugprint(DBG_RADIO, "AvailDataReq sent (%d bytes)\n", offset);
-}
-
-void oepl_radio_send_block_request(uint32_t block_id)
-{
-    oepl_hw_debugprint(DBG_RADIO, "Sending BlockRequest for block %d...\n", block_id);
-
-    // Build BlockRequest packet
-    uint8_t packet[16];
-    size_t offset = 0;
-
-    packet[offset++] = PKT_BLOCK_REQUEST;
-
-    // MAC address
-    for (size_t i = 0; i < 8; i++) {
-        packet[offset++] = mac_address[i];
-    }
-
-    // Block ID (32-bit)
-    packet[offset++] = (block_id >> 24) & 0xFF;
-    packet[offset++] = (block_id >> 16) & 0xFF;
-    packet[offset++] = (block_id >> 8) & 0xFF;
-    packet[offset++] = block_id & 0xFF;
-
-    radio_send_packet(packet, offset);
-
-    oepl_hw_debugprint(DBG_RADIO, "BlockRequest sent\n");
-}
-
-void oepl_radio_send_xfer_complete(void)
-{
-    oepl_hw_debugprint(DBG_RADIO, "Sending XferComplete...\n");
-
-    // Build XferComplete packet
-    uint8_t packet[16];
-    size_t offset = 0;
-
-    packet[offset++] = PKT_XFER_COMPLETE;
-
-    // MAC address
-    for (size_t i = 0; i < 8; i++) {
-        packet[offset++] = mac_address[i];
-    }
-
-    radio_send_packet(packet, offset);
-
-    oepl_hw_debugprint(DBG_RADIO, "XferComplete sent\n");
+    memset(&radio_st, 0, sizeof(radio_st));
+    oepl_rf_get_mac(radio_st.mac);
+    radio_st.ap_found = false;
 }
 
 int8_t oepl_radio_scan_channels(void)
 {
-    oepl_hw_debugprint(DBG_RADIO, "Scanning channels...\n");
+    rtt_puts("Scanning for AP...\r\n");
 
-    radio_state = RADIO_STATE_SCANNING;
+    for (uint8_t ch = 0; ch < OEPL_NUM_CHANNELS; ch++) {
+        rf_status_t rc = oepl_rf_set_channel(ch);
+        if (rc != RF_OK) continue;
 
-    int8_t best_channel = -1;
-    int8_t best_rssi = -128;
+        uint8_t ieee_ch = oepl_channel_map[ch];
 
-    // Scan each OEPL channel (0-4)
-    for (uint8_t ch = OEPL_CHANNEL_MIN; ch <= OEPL_CHANNEL_MAX; ch++) {
-        oepl_radio_set_channel(ch);
+        // Build PING frame
+        struct MacFrameBcast *hdr = (struct MacFrameBcast *)tx_frame;
+        build_bcast_header(hdr);
+        tx_frame[sizeof(struct MacFrameBcast)] = PKT_PING;
+        uint8_t tx_len = sizeof(struct MacFrameBcast) + 1;
 
-        // Enable RX and listen for energy
-        oepl_radio_rx_enable(true);
-        oepl_hw_delay_ms(50);  // Sample period
+        // Try up to 5 times per channel
+        for (uint8_t attempt = 0; attempt < 5; attempt++) {
+            // 1. Start RX first (background, 300ms timeout)
+            // Must use explicit IEEE channel (channel=0 keeps RX at IDLE)
+            rc = oepl_rf_rx_start(ieee_ch, 300000);
+            if (rc != RF_OK) continue;
 
-        // TODO: Measure RSSI/LQI on this channel
-        // For now, just use channel 0
-        int8_t rssi = -80;  // Placeholder
+            // 2. TX PING (foreground within RX context)
+            rc = oepl_rf_tx(tx_frame, tx_len);
+            if (rc != RF_OK) {
+                oepl_rf_rx_stop();
+                continue;
+            }
 
-        oepl_hw_debugprint(DBG_RADIO, "Channel %d: RSSI=%d dBm\n", ch, rssi);
+            // 3. Wait for PONG response — keep polling while RX is active
+            for (uint8_t w = 0; w < 10; w++) {
+                uint8_t pkt_len;
+                int8_t rssi;
+                uint8_t *pkt = wait_for_rx(500000, &pkt_len, &rssi);
+                if (pkt) {
+                    // PONG: MacFrameNormal(21) + PKT_PONG(1) + channel(1)
+                    if (pkt_len >= sizeof(struct MacFrameNormal) + 2) {
+                        uint8_t pkt_type = pkt[sizeof(struct MacFrameNormal)];
+                        if (pkt_type == PKT_PONG) {
+                            struct MacFrameNormal *resp = (struct MacFrameNormal *)pkt;
+                            memcpy(radio_st.ap_mac, resp->src, 8);
+                            radio_st.current_channel = ch;
+                            radio_st.current_ieee_ch = ieee_ch;
+                            radio_st.last_rssi = rssi;
+                            radio_st.ap_found = true;
 
-        if (rssi > best_rssi) {
-            best_rssi = rssi;
-            best_channel = ch;
+                            oepl_rf_rx_stop();
+                            oepl_rf_rx_flush();
+
+                            rtt_puts("AP found ch=");
+                            rtt_put_hex8(ieee_ch);
+                            rtt_puts(" RSSI=");
+                            rtt_put_hex8((uint8_t)rssi);
+                            rtt_puts("\r\n");
+                            return (int8_t)ch;
+                        }
+                    }
+                    oepl_rf_rx_flush();
+                } else {
+                    // No packet — check if RX is still active
+                    if (oepl_rf_rx_status() != 0x0002) break;
+                }
+            }
+
+            // 4. Stop RX
+            oepl_rf_rx_stop();
+        }
+    }
+
+    rtt_puts("No AP found\r\n");
+    return -1;
+}
+
+bool oepl_radio_checkin(struct AvailDataInfo *out_info)
+{
+    if (!radio_st.ap_found) return false;
+
+    // Build AvailDataReq frame:
+    // MacFrameBcast(17) + PKT_TYPE(1) + AvailDataReq(21) + pad(1) = 40 bytes
+    // AP checks ret==40 exactly — the padding byte is required!
+    struct MacFrameBcast *hdr = (struct MacFrameBcast *)tx_frame;
+    build_bcast_header(hdr);
+    tx_frame[sizeof(struct MacFrameBcast)] = PKT_AVAIL_DATA_REQ;
+
+    struct AvailDataReq *req = (struct AvailDataReq *)&tx_frame[sizeof(struct MacFrameBcast) + 1];
+    memset(req, 0, sizeof(struct AvailDataReq));
+    req->lastPacketLQI = radio_st.last_lqi;
+    req->lastPacketRSSI = radio_st.last_rssi;
+    req->temperature = 25;
+    req->batteryMv = 3000;
+    req->hwType = HW_TYPE;
+    req->wakeupReason = WAKEUP_REASON_FIRSTBOOT;
+    req->capabilities = 0;
+    req->tagSoftwareVersion = 0x0001;
+    req->currentChannel = radio_st.current_channel;
+    req->customMode = 0;
+    add_crc(req, sizeof(struct AvailDataReq));
+
+    // Padding byte after struct (AP expects exactly 40 bytes MPDU)
+    tx_frame[sizeof(struct MacFrameBcast) + 1 + sizeof(struct AvailDataReq)] = 0x00;
+    uint8_t tx_len = sizeof(struct MacFrameBcast) + 1 + sizeof(struct AvailDataReq) + 1;
+
+    // Dump TX frame bytes for debugging
+    rtt_puts("TX AvailDataReq ch=");
+    rtt_put_hex8(radio_st.current_ieee_ch);
+    rtt_puts(" len=");
+    rtt_put_hex8(tx_len);
+    rtt_puts(" [");
+    for (uint8_t i = 0; i < tx_len; i++) {
+        rtt_put_hex8(tx_frame[i]);
+        if (i < tx_len - 1) rtt_puts(" ");
+    }
+    rtt_puts("]\r\n");
+
+    // 1. Start RX (background, 5s timeout) with explicit channel
+    rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 5000000);
+    if (rc != RF_OK) return false;
+
+    // 2. TX AvailDataReq (foreground within RX)
+    rc = oepl_rf_tx(tx_frame, tx_len);
+    if (rc != RF_OK) {
+        oepl_rf_rx_stop();
+        rtt_puts("TX fail\r\n");
+        return false;
+    }
+    rtt_puts("TX OK\r\n");
+
+    // 3. Wait for AvailDataInfo response — keep polling while RX is active
+    for (uint8_t attempts = 0; attempts < 50; attempts++) {
+        uint8_t pkt_len;
+        int8_t rssi;
+        uint8_t *pkt = wait_for_rx(500000, &pkt_len, &rssi);
+        if (!pkt) {
+            // No packet yet — check if RX is still active
+            if (oepl_rf_rx_status() != 0x0002) {
+                rtt_puts("RX: ended\r\n");
+                break;
+            }
+            continue;  // RX still active, keep polling
         }
 
-        oepl_radio_rx_enable(false);
+        // Dump first bytes of received frame
+        rtt_puts("RX: len=");
+        rtt_put_hex8(pkt_len);
+        rtt_puts(" [");
+        uint8_t dump_len = (pkt_len > 16) ? 16 : pkt_len;
+        for (uint8_t i = 0; i < dump_len; i++) {
+            rtt_put_hex8(pkt[i]);
+            if (i < dump_len - 1) rtt_puts(" ");
+        }
+        rtt_puts("]\r\n");
+
+        if (pkt_len >= sizeof(struct MacFrameNormal) + 1 + sizeof(struct AvailDataInfo)) {
+            uint8_t pkt_type = pkt[sizeof(struct MacFrameNormal)];
+            if (pkt_type == PKT_AVAIL_DATA_INFO) {
+                struct AvailDataInfo *info = (struct AvailDataInfo *)&pkt[sizeof(struct MacFrameNormal) + 1];
+                if (check_crc(info, sizeof(struct AvailDataInfo))) {
+                    memcpy(out_info, info, sizeof(struct AvailDataInfo));
+                    radio_st.last_rssi = rssi;
+                    oepl_rf_rx_stop();
+                    oepl_rf_rx_flush();
+                    rtt_puts("Got AvailDataInfo type=");
+                    rtt_put_hex8(info->dataType);
+                    rtt_puts("\r\n");
+                    return true;
+                }
+                rtt_puts("CRC fail\r\n");
+            }
+        }
+        oepl_rf_rx_flush();
     }
 
-    radio_state = RADIO_STATE_IDLE;
-
-    oepl_hw_debugprint(DBG_RADIO, "Best channel: %d (RSSI=%d dBm)\n", best_channel, best_rssi);
-
-    return best_channel;
+    oepl_rf_rx_stop();
+    rtt_puts("No AvailDataInfo\r\n");
+    return false;
 }
 
-void oepl_radio_set_channel(uint8_t channel)
+bool oepl_radio_send_xfer_complete(void)
 {
-    if (channel > OEPL_CHANNEL_MAX) {
-        channel = OEPL_CHANNEL_MAX;
+    if (!radio_st.ap_found) return false;
+
+    struct MacFrameNormal *hdr = (struct MacFrameNormal *)tx_frame;
+    build_unicast_header(hdr, radio_st.ap_mac);
+    tx_frame[sizeof(struct MacFrameNormal)] = PKT_XFER_COMPLETE;
+    uint8_t tx_len = sizeof(struct MacFrameNormal) + 1;
+
+    // Start RX, then TX (explicit channel)
+    rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 500000);
+    if (rc != RF_OK) return false;
+
+    rtt_puts("TX XferComplete\r\n");
+    rc = oepl_rf_tx(tx_frame, tx_len);
+    oepl_rf_rx_stop();
+    return rc == RF_OK;
+}
+
+bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_type,
+                               uint8_t *block_buf, uint16_t *out_size)
+{
+    if (!radio_st.ap_found) return false;
+
+    struct MacFrameNormal *hdr = (struct MacFrameNormal *)tx_frame;
+    build_unicast_header(hdr, radio_st.ap_mac);
+    tx_frame[sizeof(struct MacFrameNormal)] = PKT_BLOCK_REQUEST;
+
+    struct BlockRequest *breq = (struct BlockRequest *)&tx_frame[sizeof(struct MacFrameNormal) + 1];
+    memset(breq, 0, sizeof(struct BlockRequest));
+    breq->ver = data_ver;
+    breq->blockId = block_id;
+    breq->type = data_type;
+    // Request all parts (set bits 0-41)
+    memset(breq->requestedParts, 0xFF, BLOCK_REQ_PARTS_BYTES);
+    breq->requestedParts[5] &= 0x03;
+    add_crc(breq, sizeof(struct BlockRequest));
+
+    uint8_t tx_len = sizeof(struct MacFrameNormal) + 1 + sizeof(struct BlockRequest);
+
+    rtt_puts("TX BlockReq blk=");
+    rtt_put_hex8(block_id);
+    rtt_puts("\r\n");
+
+    // Start RX (5s timeout for block parts)
+    rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 5000000);
+    if (rc != RF_OK) return false;
+
+    // TX block request
+    rc = oepl_rf_tx(tx_frame, tx_len);
+    if (rc != RF_OK) {
+        oepl_rf_rx_stop();
+        return false;
     }
 
-    current_channel = channel;
-
-    // TODO: Configure CC2630 RF Core to new channel
-    // This requires TI RF driver configuration
-
-    oepl_hw_debugprint(DBG_RADIO, "Set channel: %d\n", channel);
-}
-
-void oepl_radio_rx_enable(bool enable)
-{
-    if (enable) {
-        radio_state = RADIO_STATE_RX;
-        // TODO: Enable CC2630 RF RX
-    } else {
-        radio_state = RADIO_STATE_IDLE;
-        // TODO: Disable CC2630 RF RX
+    // Wait for BlockRequestAck
+    uint16_t wait_ms = 0;
+    uint8_t pkt_len;
+    int8_t rssi;
+    uint8_t *pkt = wait_for_rx(800000, &pkt_len, &rssi);
+    if (pkt && pkt_len >= sizeof(struct MacFrameNormal) + 1) {
+        uint8_t pkt_type = pkt[sizeof(struct MacFrameNormal)];
+        if (pkt_type == PKT_BLOCK_REQUEST_ACK && pkt_len >= sizeof(struct MacFrameNormal) + 1 + sizeof(struct BlockRequestAck)) {
+            struct BlockRequestAck *ack = (struct BlockRequestAck *)&pkt[sizeof(struct MacFrameNormal) + 1];
+            wait_ms = ack->pleaseWaitMs;
+        }
+        oepl_rf_rx_flush();
     }
-}
+    oepl_rf_rx_stop();
 
-bool oepl_radio_is_idle(void)
-{
-    return radio_state == RADIO_STATE_IDLE;
-}
-
-// -----------------------------------------------------------------------------
-//                          Static Function Definitions
-// -----------------------------------------------------------------------------
-
-static void radio_configure_2_4ghz(void)
-{
-    // Configure CC2630 RF Core for 2.4 GHz IEEE 802.15.4 proprietary mode
-    // This is based on the CC2630 OEPL firmware analysis
-
-    // TODO: Use TI RF driver to configure:
-    // - Frequency: 2.4 GHz IEEE 802.15.4 (channels 11-26)
-    // - OEPL uses channels 0-4 mapped to 802.15.4 channels
-    // - Data rate: 250 kbps (802.15.4 standard)
-    // - TX power: Maximum allowed
-    // - PAN ID: 0x4447
-    //
-    // NOTE: CC2630 is a 2.4 GHz part (not Sub-GHz).
-    // AP ping confirmed working with OEPL closed-source 4.2" firmware.
-
-    oepl_hw_debugprint(DBG_RADIO, "Configuring 2.4 GHz IEEE 802.15.4 mode...\n");
-
-    // Placeholder configuration
-    // In production, this uses TI SmartRF Studio settings
-}
-
-static void radio_send_packet(const uint8_t* data, size_t len)
-{
-    if (radio_state != RADIO_STATE_IDLE) {
-        oepl_hw_debugprint(DBG_RADIO, "Radio busy, cannot send\n");
-        return;
+    // Wait the requested time
+    if (wait_ms > 0) {
+        for (volatile uint32_t d = 0; d < (uint32_t)wait_ms * 8000; d++)
+            __asm volatile("nop");
     }
 
-    radio_state = RADIO_STATE_TX;
+    // Now receive block parts (long timeout)
+    uint8_t parts_received[BLOCK_REQ_PARTS_BYTES];
+    memset(parts_received, 0, sizeof(parts_received));
+    uint8_t total_parts = 0;
+    memset(block_buf, 0xFF, BLOCK_DATA_SIZE);
 
-    // TODO: Use CC2630 RF Core to transmit packet
-    // This requires TI RF driver TX API
+    rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 10000000);
+    if (rc != RF_OK) return false;
 
-    oepl_hw_debugprint(DBG_RADIO, "TX: %d bytes on channel %d\n", len, current_channel);
+    for (volatile uint32_t w = 0; w < 20000000; w++) {
+        pkt = oepl_rf_rx_get(&pkt_len, &rssi);
+        if (pkt) {
+            if (pkt_len >= sizeof(struct MacFrameNormal) + 1) {
+                uint8_t pkt_type = pkt[sizeof(struct MacFrameNormal)];
+                if (pkt_type == PKT_BLOCK_PART) {
+                    struct BlockPart *bp = (struct BlockPart *)&pkt[sizeof(struct MacFrameNormal) + 1];
+                    if (bp->blockId == block_id && bp->blockPart < BLOCK_MAX_PARTS) {
+                        uint16_t offset = (uint16_t)bp->blockPart * BLOCK_PART_DATA_SIZE;
+                        uint16_t copy_len = BLOCK_PART_DATA_SIZE;
+                        if (offset + copy_len > BLOCK_DATA_SIZE)
+                            copy_len = BLOCK_DATA_SIZE - offset;
+                        memcpy(&block_buf[offset], bp->data, copy_len);
 
-    // Simulate transmission delay
-    oepl_hw_delay_ms(10);
+                        uint8_t byte_idx = bp->blockPart / 8;
+                        uint8_t bit_idx = bp->blockPart % 8;
+                        if (!(parts_received[byte_idx] & (1 << bit_idx))) {
+                            parts_received[byte_idx] |= (1 << bit_idx);
+                            total_parts++;
+                        }
+                    }
+                }
+            }
+            oepl_rf_rx_flush();
+            if (total_parts >= BLOCK_MAX_PARTS) break;
+        }
+    }
+    oepl_rf_rx_stop();
 
-    radio_state = RADIO_STATE_IDLE;
+    rtt_puts("Block parts: ");
+    rtt_put_hex8(total_parts);
+    rtt_puts("/");
+    rtt_put_hex8(BLOCK_MAX_PARTS);
+    rtt_puts("\r\n");
+
+    *out_size = BLOCK_DATA_SIZE;
+    return total_parts > 0;
 }
 
-static void radio_generate_mac_address(void)
+radio_state_t *oepl_radio_get_state(void)
 {
-    // Generate MAC address from CC2630 chip unique ID
-    // CC2630 has factory-programmed unique ID in FCFG
-
-    // TODO: Read from FCFG1 registers
-    // For now, use placeholder
-
-    mac_address[0] = 0x02;  // Locally administered
-    mac_address[1] = 0x00;
-    mac_address[2] = 0x00;
-    mac_address[3] = 0x00;
-    mac_address[4] = 0x00;
-    mac_address[5] = 0x00;
-    mac_address[6] = 0x00;
-    mac_address[7] = 0x01;
+    return &radio_st;
 }
