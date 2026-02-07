@@ -15,20 +15,38 @@
 #include "rf_ieee_cmd.h"
 #include "rf_data_entry.h"
 #include "rf_mailbox.h"
+#include "hw_rfc_pwr.h"
+#include "hw_rfc_dbell.h"
+#include "hw_memmap.h"
+#include "osc.h"
+
+// CC2630 RF core patches for IEEE 802.15.4 (required for PG2.x)
+#define PATCH_FUN_SPEC static inline
+#include "rf_patches/rf_patch_cpe_ieee.h"
+#include "rf_patches/rf_patch_mce_ieee_s.h"
+#include "rf_patches/rf_patch_rfe_ieee.h"
 
 // FCFG1 IEEE MAC address registers
-#define FCFG1_MAC_15_4_0    (*(volatile uint32_t *)0x50001294)
-#define FCFG1_MAC_15_4_1    (*(volatile uint32_t *)0x50001298)
+// FCFG1 base = 0x50001000, MAC_15_4_0 offset = 0x2F0, MAC_15_4_1 offset = 0x2F4
+#define FCFG1_MAC_15_4_0    (*(volatile uint32_t *)0x500012F0)
+#define FCFG1_MAC_15_4_1    (*(volatile uint32_t *)0x500012F4)
 
 // OEPL channel map: 6 channels -> IEEE 802.15.4 channels
 const uint8_t oepl_channel_map[OEPL_NUM_CHANNELS] = {11, 15, 20, 25, 26, 27};
 
-// RF overrides for IEEE 802.15.4 2.4 GHz (CC2630)
-// Minimal set - mostly use defaults
+// RF overrides for IEEE 802.15.4 2.4 GHz (CC2630 PG2.3)
+// From Contiki OS ieee-mode.c - tested configuration for CC26x0
 static uint32_t rf_overrides[] = {
-    // DC/DC mode for CC2630 (internal bias, differential mode)
-    // 0x00354038 = set DCDC config
-    // 0x000F8883 = adjust synth
+    0x00354038,  /* Synth: Set RTRIM (POTAILRESTRIM) to 5 */
+    0x4001402D,  /* Synth: Correct CKVD latency setting (address) */
+    0x00608402,  /* Synth: Correct CKVD latency setting (value) */
+    0x000784A3,  /* Synth: Set FREF = 3.43 MHz (24 MHz / 7) */
+    0xA47E0583,  /* Synth: Set loop bandwidth after lock to 80 kHz (K2) */
+    0xEAE00603,  /* Synth: Set loop bandwidth after lock to 80 kHz (K3, LSB) */
+    0x00010623,  /* Synth: Set loop bandwidth after lock to 80 kHz (K3, MSB) */
+    0x002B50DC,  /* Adjust AGC DC filter */
+    0x05000243,  /* Increase synth programming timeout */
+    0x002082C3,  /* Increase synth programming timeout */
     END_OVERRIDE
 };
 
@@ -100,74 +118,95 @@ static rf_status_t rf_wait_cmd_done(volatile uint16_t *status_ptr, uint32_t time
 
 rf_status_t oepl_rf_init(void)
 {
-    rtt_puts("RF: Powering RF core...\r\n");
+    // 1. Switch to XOSC_HF - RF synth needs crystal oscillator as reference
+    OSCHF_TurnOnXosc();
+    for (volatile uint32_t i = 0; i < 1000000; i++) {
+        if (OSCHF_AttemptToSwitchToXosc()) break;
+    }
+    // If already on XOSC or switch succeeded, we're good
+    // Check current source to verify
+    if (OSCClockSourceGet(OSC_SRC_CLK_HF) != OSC_XOSC_HF) {
+        rtt_puts("RF: XOSC_HF FAIL\r\n");
+        return RF_ERR_POWER;
+    }
 
-    // 1. Power on RF core domain
+    // 2. Power cycle RF core for clean state
+    PRCMPowerDomainOff(PRCM_DOMAIN_RFCORE);
+    for (volatile uint32_t i = 0; i < 100000; i++) {
+        if (PRCMPowerDomainStatus(PRCM_DOMAIN_RFCORE) == PRCM_DOMAIN_POWER_OFF)
+            break;
+    }
     PRCMPowerDomainOn(PRCM_DOMAIN_RFCORE);
-
-    // Wait for power domain to come up
     for (volatile uint32_t i = 0; i < 500000; i++) {
         if (PRCMPowerDomainStatus(PRCM_DOMAIN_RFCORE) == PRCM_DOMAIN_POWER_ON)
             break;
     }
     if (PRCMPowerDomainStatus(PRCM_DOMAIN_RFCORE) != PRCM_DOMAIN_POWER_ON) {
-        rtt_puts("RF: Power domain FAILED\r\n");
+        rtt_puts("RF: Power FAIL\r\n");
         return RF_ERR_POWER;
     }
-    rtt_puts("RF: Power domain ON\r\n");
 
-    // 2. Enable RF core clock domain
+    // 3. Enable clocks
     PRCMDomainEnable(PRCM_DOMAIN_RFCORE);
     PRCMLoadSet();
     while (!PRCMLoadGet()) {}
+    HWREG(RFC_PWR_NONBUF_BASE + RFC_PWR_O_PWMCLKEN) = 0x7FF;
 
-    // 3. Enable CPE/CPERAM/RFC clocks
-    RFCClockEnable();
-    rtt_puts("RF: Clocks enabled\r\n");
-
-    // 4. Wait for RF core boot
+    // 4. Clear IRQ flags, wait for boot, apply CPE patch
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0x0;
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIEN) = 0x0;
+    RFCAckIntClear();
     rf_wait_boot();
-    rtt_puts("RF: Boot done\r\n");
+    rf_patch_cpe_ieee();
 
-    // 5. Send CMD_RADIO_SETUP for IEEE 802.15.4
+    // 5. Verify RF core is alive
+    uint32_t cmdsta = RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_PING));
+    if ((cmdsta & 0xFF) != CMDSTA_Done) {
+        rtt_puts("RF: PING FAIL\r\n");
+        return RF_ERR_BOOT;
+    }
+
+    // 6. Configure analog: bus request, VCO LDO, RTRIM
+    RFCDoorbellSendTo(CMDR_DIR_CMD_1BYTE(CMD_BUS_REQUEST, 1));
+    RFCAdi3VcoLdoVoltageMode(true);
+
     memset(&rf_cmd_setup, 0, sizeof(rf_cmd_setup));
     rf_cmd_setup.commandNo = CMD_RADIO_SETUP;
+    rf_cmd_setup.mode = 0x01;                    // IEEE 802.15.4
+    rf_cmd_setup.config.frontEndMode = 0x00;     // Differential
+    rf_cmd_setup.config.biasMode = 0x00;         // Internal bias
+    rf_cmd_setup.config.analogCfgMode = 0x00;    // Write analog config
+    rf_cmd_setup.config.bNoFsPowerUp = 0;        // Power up FS
+    rf_cmd_setup.txPower = 0x9330;               // 5 dBm
+    rf_cmd_setup.pRegOverride = rf_overrides;
+    RFCRTrim((rfc_radioOp_t *)&rf_cmd_setup);
+
+    // 7. Send CMD_RADIO_SETUP
+    HWREG(RFC_DBELL_NONBUF_BASE + RFC_DBELL_O_RFCPEIFG) = 0x0;
     rf_cmd_setup.status = IDLE;
     rf_cmd_setup.pNextOp = NULL;
     rf_cmd_setup.startTime = 0;
     rf_cmd_setup.startTrigger.triggerType = TRIG_NOW;
     rf_cmd_setup.condition.rule = COND_NEVER;
-    rf_cmd_setup.mode = 0x01;  // IEEE 802.15.4
-    rf_cmd_setup.config.frontEndMode = 0x00;  // Differential
-    rf_cmd_setup.config.biasMode = 0;         // Internal bias
-    rf_cmd_setup.config.analogCfgMode = 0x00; // Write analog config (first time)
-    rf_cmd_setup.config.bNoFsPowerUp = 0;     // Power up FS
-    rf_cmd_setup.txPower = 0x9330;            // 5 dBm (typical CC2630 setting)
-    rf_cmd_setup.pRegOverride = rf_overrides;
 
-    rf_status_t rc = rf_send_cmd((uint32_t)&rf_cmd_setup);
-    if (rc != RF_OK) {
-        rtt_puts("RF: RADIO_SETUP send FAILED\r\n");
+    rtt_puts("RF: init...");
+    if (rf_send_cmd((uint32_t)&rf_cmd_setup) != RF_OK) return RF_ERR_SETUP;
+    if (rf_wait_cmd_done(&rf_cmd_setup.status, 1000000) != RF_OK) {
+        rtt_puts("FAIL\r\n");
         return RF_ERR_SETUP;
     }
+    rtt_puts("OK\r\n");
 
-    rc = rf_wait_cmd_done(&rf_cmd_setup.status, 500000);
-    if (rc != RF_OK) {
-        rtt_puts("RF: RADIO_SETUP FAILED\r\n");
-        return RF_ERR_SETUP;
-    }
-    rtt_puts("RF: RADIO_SETUP OK\r\n");
-
-    // 6. Set up RX data queue (single entry, circular)
+    // 8. Set up RX data queue (single entry, circular)
     memset(rx_buf, 0, sizeof(rx_buf));
-    rx_entry->pNextEntry = (uint8_t *)rx_entry;  // Circular: points to self
+    rx_entry->pNextEntry = (uint8_t *)rx_entry;
     rx_entry->status = DATA_ENTRY_PENDING;
     rx_entry->config.type = DATA_ENTRY_TYPE_GEN;
-    rx_entry->config.lenSz = 1;  // 1-byte length prefix in each element
+    rx_entry->config.lenSz = 1;
     rx_entry->length = RX_BUF_SIZE - sizeof(rfc_dataEntryGeneral_t) + 1;
 
     rx_queue.pCurrEntry = (uint8_t *)rx_entry;
-    rx_queue.pLastEntry = NULL;  // Circular queue
+    rx_queue.pLastEntry = NULL;
 
     return RF_OK;
 }
