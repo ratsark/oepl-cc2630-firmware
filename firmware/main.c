@@ -10,6 +10,7 @@
 #include "rtt.h"
 #include "oepl_rf_cc2630.h"
 #include "oepl_radio_cc2630.h"
+#include "oepl_hw_abstraction_cc2630.h"
 #include "drivers/oepl_display_driver_uc8159_600x448.h"
 
 #define HWREG(addr) (*((volatile uint32_t *)(addr)))
@@ -22,8 +23,11 @@
 #define PRCM_O_GPIOCLKGR        0x48
 #define PRCM_O_CLKLOADCTL       0x28
 
-// Block buffer for image download (4KB per block)
-static uint8_t block_buf[BLOCK_DATA_SIZE];
+// Block buffers for image download (4KB each)
+// bw_buf: cached B/W block, red_buf: cached Red block
+static uint8_t bw_buf[BLOCK_DATA_SIZE];
+static uint8_t red_buf[BLOCK_DATA_SIZE];
+static int8_t bw_cache_id, red_cache_id;  // which block ID is cached (-1 = none)
 
 static void delay_cycles(volatile uint32_t n)
 {
@@ -61,7 +65,7 @@ static bool do_scan_and_checkin(struct AvailDataInfo *info)
     int8_t ch = oepl_radio_scan_channels();
     if (ch < 0) {
         // Try direct checkin on all channels as fallback
-        rtt_puts("No PONG, trying direct checkin...\r\n");
+        rtt_puts("Direct checkin...\r\n");
         for (uint8_t c = 0; c < OEPL_NUM_CHANNELS; c++) {
             rf_status_t rc = oepl_rf_set_channel(c);
             if (rc != RF_OK) continue;
@@ -73,6 +77,9 @@ static bool do_scan_and_checkin(struct AvailDataInfo *info)
             rst->ap_found = true;
             memset(rst->ap_mac, 0xFF, 8);
 
+            rtt_puts("Ch ");
+            rtt_put_hex8(ieee_ch);
+            rtt_puts(": ");
             if (oepl_radio_checkin(info)) return true;
         }
         return false;
@@ -83,62 +90,192 @@ static bool do_scan_and_checkin(struct AvailDataInfo *info)
     return oepl_radio_checkin(info);
 }
 
-static bool download_image(struct AvailDataInfo *info)
+// Download a specific block into a buffer, with retries
+static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
+                            uint8_t *buf, uint16_t *out_size)
+{
+    rtt_puts("B");
+    rtt_put_hex8(block_id);
+
+    for (uint8_t attempt = 0; attempt < 15; attempt++) {
+        if (attempt > 0) {
+            rtt_puts("R");
+            // Increasing backoff: 500ms first 4, then 1s, then 2s
+            uint16_t delay = (attempt < 5) ? 500 : (attempt < 10) ? 1000 : 2000;
+            oepl_hw_delay_ms(delay);
+        }
+        if (oepl_radio_request_block(block_id, info->dataVer, info->dataType,
+                                      buf, out_size)) {
+            rtt_puts("+");
+            return true;
+        }
+    }
+    rtt_puts("!");
+    return false;
+}
+
+// Ensure a block is in the B/W cache
+static bool ensure_bw_block(uint8_t block_id, struct AvailDataInfo *info)
+{
+    if (bw_cache_id == block_id) return true;
+    uint16_t sz;
+    if (!download_block(block_id, info, bw_buf, &sz)) return false;
+    bw_cache_id = block_id;
+    return true;
+}
+
+// Ensure a block is in the Red cache
+static bool ensure_red_block(uint8_t block_id, struct AvailDataInfo *info)
+{
+    if (red_cache_id == block_id) return true;
+    uint16_t sz;
+    if (!download_block(block_id, info, red_buf, &sz)) return false;
+    red_cache_id = block_id;
+    return true;
+}
+
+// Get bytes from the image at a given offset, using cached blocks
+static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
+                             struct AvailDataInfo *info, bool is_red_plane)
+{
+    while (len > 0) {
+        uint8_t block_id = (uint8_t)(offset / BLOCK_DATA_SIZE);
+        uint16_t block_off = (uint16_t)(offset % BLOCK_DATA_SIZE);
+        uint16_t avail = (uint16_t)BLOCK_DATA_SIZE - block_off;
+        if (avail > len) avail = len;
+
+        uint8_t *cache;
+        if (is_red_plane) {
+            if (!ensure_red_block(block_id, info)) return false;
+            cache = red_buf;
+        } else {
+            if (!ensure_bw_block(block_id, info)) return false;
+            cache = bw_buf;
+        }
+
+        memcpy(out, &cache[block_off], avail);
+        out += avail;
+        offset += avail;
+        len -= avail;
+    }
+    return true;
+}
+
+// Convert 1 byte B/W + 1 byte Red (8 pixels) to 4 bytes of 4bpp UC8159
+// B/W: bit=1 → black, bit=0 → white. Red: bit=1 → red (overrides B/W)
+// UC8159 4bpp: 0x0=black, 0x3=white, 0x4=red
+static void bwr_to_4bpp(uint8_t bw, uint8_t red, uint8_t out[4])
+{
+    for (uint8_t i = 0; i < 4; i++) {
+        uint8_t hi_bw  = (bw >> 7) & 1;
+        uint8_t hi_red = (red >> 7) & 1;
+        uint8_t lo_bw  = (bw >> 6) & 1;
+        uint8_t lo_red = (red >> 6) & 1;
+
+        uint8_t hi_nib = hi_red ? 0x4 : (hi_bw ? 0x0 : 0x3);
+        uint8_t lo_nib = lo_red ? 0x4 : (lo_bw ? 0x0 : 0x3);
+
+        out[i] = (hi_nib << 4) | lo_nib;
+        bw <<= 2;
+        red <<= 2;
+    }
+}
+
+// Download image and stream to display
+static bool download_and_display(struct AvailDataInfo *info)
 {
     uint32_t data_size = info->dataSize;
-    uint8_t num_blocks = (data_size + BLOCK_DATA_SIZE - 1) / BLOCK_DATA_SIZE;
+    uint8_t data_type = info->dataType;
+    uint16_t width = DISPLAY_WIDTH_600X448;
+    uint16_t height = DISPLAY_HEIGHT_600X448;
+    uint16_t row_bytes = width / 8;           // 75 bytes per 1bpp row
+    uint32_t plane_size = (uint32_t)row_bytes * height;  // 33,600 bytes
+    bool has_red = (data_type == 0x21) && (data_size >= plane_size * 2);
 
-    rtt_puts("Download: size=");
+    rtt_puts("DL+DISP: sz=");
     rtt_put_hex32(data_size);
-    rtt_puts(" blocks=");
-    rtt_put_hex8(num_blocks);
-    rtt_puts(" type=");
-    rtt_put_hex8(info->dataType);
+    rtt_puts(" t=");
+    rtt_put_hex8(data_type);
+    rtt_puts(has_red ? " BWR" : " BW");
     rtt_puts("\r\n");
 
-    uint32_t total_received = 0;
+    bw_cache_id = -1;
+    red_cache_id = -1;
 
-    for (uint8_t blk = 0; blk < num_blocks; blk++) {
-        rtt_puts("Block ");
-        rtt_put_hex8(blk);
-        rtt_puts("/");
-        rtt_put_hex8(num_blocks);
+    // Open display for pixel data: DTM1 (cmd 0x10) in one CS frame
+    oepl_hw_gpio_set(15, false);  // DC = command
+    oepl_hw_spi_cs_assert();
+    { uint8_t c = 0x10; oepl_hw_spi_send_raw(&c, 1); }
+    oepl_hw_gpio_set(15, true);   // DC = data
 
-        uint16_t block_size = 0;
-        bool ok = oepl_radio_request_block(blk, info->dataVer, info->dataType,
-                                            block_buf, &block_size);
-        if (!ok) {
-            rtt_puts(" FAIL\r\n");
-            // Retry once
-            rtt_puts("Retry...\r\n");
-            ok = oepl_radio_request_block(blk, info->dataVer, info->dataType,
-                                           block_buf, &block_size);
-            if (!ok) {
-                rtt_puts(" FAIL again\r\n");
+    // Stream rows to display
+    uint8_t bw_line[75];
+    uint8_t red_line[75];
+    uint8_t row_4bpp[300];
+
+    for (uint16_t y = 0; y < height; y++) {
+        uint32_t bw_offset = (uint32_t)y * row_bytes;
+
+        // Get B/W line
+        if (!get_image_bytes(bw_offset, bw_line, row_bytes, info, false)) {
+            rtt_puts("BW fail\r\n");
+            oepl_hw_spi_cs_deassert();
+            return false;
+        }
+
+        // Get Red line (if 2bpp)
+        if (has_red) {
+            uint32_t red_offset = plane_size + (uint32_t)y * row_bytes;
+            if (!get_image_bytes(red_offset, red_line, row_bytes, info, true)) {
+                rtt_puts("RD fail\r\n");
+                oepl_hw_spi_cs_deassert();
                 return false;
             }
+        } else {
+            memset(red_line, 0, row_bytes);
         }
-        rtt_puts(" OK\r\n");
 
-        total_received += block_size;
-
-        // Print first 16 bytes for verification
-        rtt_puts("  [");
-        uint8_t dump = (block_size > 16) ? 16 : (uint8_t)block_size;
-        for (uint8_t i = 0; i < dump; i++) {
-            rtt_put_hex8(block_buf[i]);
-            if (i < dump - 1) rtt_puts(" ");
+        // Convert to 4bpp
+        for (uint8_t x = 0; x < row_bytes; x++) {
+            bwr_to_4bpp(bw_line[x], red_line[x], &row_4bpp[x * 4]);
         }
-        rtt_puts("]\r\n");
+
+        // Send row to display
+        oepl_hw_spi_send_raw(row_4bpp, 300);
+
+        // Progress every 64 rows
+        if ((y & 0x3F) == 0) {
+            rtt_puts(".");
+        }
     }
 
-    rtt_puts("Download complete: ");
-    rtt_put_hex32(total_received);
-    rtt_puts(" bytes\r\n");
+    oepl_hw_spi_cs_deassert();
+    rtt_puts("\r\nDATA OK\r\n");
 
-    // Send XferComplete to AP
-    rtt_puts("Sending XferComplete...\r\n");
+    // DATA_STOP (0x11)
+    oepl_hw_gpio_set(15, false);
+    oepl_hw_spi_cs_assert();
+    { uint8_t c = 0x11; oepl_hw_spi_send_raw(&c, 1); }
+    oepl_hw_spi_cs_deassert();
+
+    // DISPLAY_REFRESH (0x12)
+    oepl_hw_gpio_set(15, false);
+    oepl_hw_spi_cs_assert();
+    { uint8_t c = 0x12; oepl_hw_spi_send_raw(&c, 1); }
+    oepl_hw_spi_cs_deassert();
+
+    rtt_puts("REF...");
+
+    // Wait for refresh (~26 seconds)
+    for (uint32_t i = 0; i < 30000; i++) {
+        if (oepl_hw_gpio_get(13)) break;  // BUSY HIGH = ready
+        oepl_hw_delay_ms(1);
+    }
+    rtt_puts("done\r\n");
+
+    // Send XferComplete
     oepl_radio_send_xfer_complete();
+    rtt_puts("XferComplete\r\n");
 
     return true;
 }
@@ -172,8 +309,9 @@ int main(void)
     print_mac_msb(mac);
     rtt_puts("\r\n");
 
-    // --- Display test pattern (proves display is working) ---
-    display_test_pattern();
+    // --- Initialize display (no fill, saves 26s) ---
+    uc8159_init();
+    rtt_puts("Display init OK\r\n");
 
     // --- Initialize RF core ---
     rf_status_t rc = oepl_rf_init();
@@ -207,11 +345,11 @@ int main(void)
             rtt_puts("\r\n");
 
             if (info.dataType != DATATYPE_NOUPDATE) {
-                // AP has data for us — download it
-                if (download_image(&info)) {
-                    rtt_puts("*** IMAGE DOWNLOADED ***\r\n");
+                // AP has data for us — download and display it
+                if (download_and_display(&info)) {
+                    rtt_puts("*** IMAGE DISPLAYED ***\r\n");
                 } else {
-                    rtt_puts("Download failed\r\n");
+                    rtt_puts("Display failed\r\n");
                 }
             } else {
                 rtt_puts("No pending data\r\n");

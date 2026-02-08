@@ -42,7 +42,7 @@
 // --- Protocol Structs (packed, little-endian on wire) ---
 
 struct __attribute__((packed)) MacFrameBcast {
-    uint8_t fcs[2];       // {0x21, 0xC8} for broadcast
+    uint8_t fcs[2];       // {0x01, 0xC8} for broadcast
     uint8_t seq;
     uint16_t dstPan;      // PROTO_PAN_ID (LE)
     uint16_t dstAddr;     // 0xFFFF (broadcast)

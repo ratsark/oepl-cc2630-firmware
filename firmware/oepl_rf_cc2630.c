@@ -254,13 +254,6 @@ rf_status_t oepl_rf_set_channel(uint8_t oepl_channel_idx)
     // IEEE 802.15.4: freq = 2405 + 5 * (channel - 11) MHz
     uint16_t freq_mhz = 2405 + 5 * (ieee_ch - 11);
 
-    rtt_puts("RF: CMD_FS ch=");
-    rtt_put_hex8(ieee_ch);
-    rtt_puts(" freq=");
-    rtt_put_hex8((freq_mhz >> 8) & 0xFF);
-    rtt_put_hex8(freq_mhz & 0xFF);
-    rtt_puts("\r\n");
-
     memset(&rf_cmd_fs, 0, sizeof(rf_cmd_fs));
     rf_cmd_fs.commandNo = CMD_FS;
     rf_cmd_fs.status = IDLE;
@@ -278,11 +271,11 @@ rf_status_t oepl_rf_set_channel(uint8_t oepl_channel_idx)
 
     rc = rf_wait_cmd_done(&rf_cmd_fs.status, 500000);
     if (rc != RF_OK) {
-        rtt_puts("RF: CMD_FS FAILED\r\n");
+        rtt_puts("RF: FS ch=");
+        rtt_put_hex8(ieee_ch);
+        rtt_puts(" FAIL\r\n");
         return RF_ERR_FS;
     }
-
-    rtt_puts("RF: CMD_FS OK\r\n");
     return RF_OK;
 }
 
@@ -419,16 +412,12 @@ rf_status_t oepl_rf_rx_start(uint8_t ieee_channel, uint32_t timeout_us)
         if (*(volatile uint16_t *)&rf_cmd_rx.status == ACTIVE) break;
     }
     volatile uint16_t s = *(volatile uint16_t *)&rf_cmd_rx.status;
-    rtt_puts("RF: RX s=0x");
-    rtt_put_hex8((s >> 8) & 0xFF);
-    rtt_put_hex8(s & 0xFF);
-
-    // Read RSSI to verify receiver is alive
-    uint32_t rssi_sta = RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_GET_RSSI));
-    int8_t rssi = (int8_t)((rssi_sta >> 16) & 0xFF);
-    rtt_puts(" rssi=");
-    rtt_put_hex8((uint8_t)rssi);
-    rtt_puts("\r\n");
+    if (s != ACTIVE) {
+        rtt_puts("RF: RX s=0x");
+        rtt_put_hex8((s >> 8) & 0xFF);
+        rtt_put_hex8(s & 0xFF);
+        rtt_puts(" (not ACTIVE)\r\n");
+    }
 
     return RF_OK;
 }
@@ -449,28 +438,22 @@ void oepl_rf_rx_stop(void)
 
 uint8_t *oepl_rf_rx_get(uint8_t *out_len, int8_t *out_rssi)
 {
-    // Must use volatile read — RF core updates this from DMA
     if (*(volatile uint8_t *)&rx_entry->status != DATA_ENTRY_FINISHED) {
         return NULL;
     }
 
-    // Data format in general entry with lenSz=1:
-    // [1-byte length] [frame data...] [RSSI byte if appended]
     uint8_t *data = &rx_entry->data;
-    uint8_t pkt_len = data[0];  // Length prefix
+    uint8_t pkt_len = data[0];
 
     if (pkt_len < 2 || pkt_len > (RX_BUF_SIZE - 20)) {
         *out_len = 0;
         return NULL;
     }
 
-    // RSSI is appended after the frame data
-    // Frame data starts at data[1], length is pkt_len
-    // RSSI is the last byte of the received data (after frame, before we stripped CRC)
-    *out_rssi = (int8_t)data[pkt_len];  // RSSI byte appended by radio
-    *out_len = pkt_len - 1;  // Subtract the RSSI byte from length
+    *out_rssi = (int8_t)data[pkt_len];
+    *out_len = pkt_len - 1;
 
-    return &data[1];  // Skip length byte, return frame data
+    return &data[1];
 }
 
 void oepl_rf_rx_flush(void)
