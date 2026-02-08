@@ -34,17 +34,9 @@ SOURCES = \
 	$(FIRMWARE_DIR)/rtt.c \
 	$(FIRMWARE_DIR)/oepl_rf_cc2630.c \
 	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
+	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
+	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
 	$(FIRMWARE_DIR)/main.c
-
-# Full source list (uncomment when ready for full build):
-#SOURCES += \
-#	$(FIRMWARE_DIR)/oepl_app.c \
-#	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
-#	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
-#	$(FIRMWARE_DIR)/oepl_nvm_cc2630.c \
-#	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
-#	$(DRIVERS_DIR)/oepl_display_driver_common_cc2630.c \
-#	$(FIRMWARE_DIR)/oepl_compression.c
 
 # Include paths
 INCLUDES = \

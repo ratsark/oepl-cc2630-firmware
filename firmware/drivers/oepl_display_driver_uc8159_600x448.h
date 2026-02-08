@@ -15,7 +15,7 @@
 // Display parameters
 #define DISPLAY_WIDTH_600X448   600
 #define DISPLAY_HEIGHT_600X448  448
-#define DISPLAY_BPP             1    // 1 bit per pixel (monochrome)
+#define DISPLAY_BPP             4    // 4 bits per pixel (BWR: 0x0=black, 0x3=white, 0x4=red)
 
 // UC8159 Commands (from stock firmware analysis)
 #define CMD_WAKE                0xAB
@@ -54,11 +54,11 @@ void uc8159_init(void);
 
 /**
  * Draw framebuffer to display
- * @param framebuffer Pointer to image data (600×448 / 8 = 16,800 bytes)
+ * @param framebuffer Pointer to 4bpp BWR image data (600×448 / 2 = 134,400 bytes)
  * @param len Length of framebuffer data
  *
- * Note: Due to RAM constraints (20KB), this function transfers data
- * in chunks from compressed storage rather than holding full framebuffer
+ * Note: Due to RAM constraints, caller should pass data in chunks.
+ * For streaming from radio, use uc8159_draw_begin/stream/end.
  */
 void uc8159_draw(const uint8_t* framebuffer, size_t len);
 
@@ -71,5 +71,12 @@ void uc8159_sleep(void);
  * Wake display from sleep mode
  */
 void uc8159_wake(void);
+
+/**
+ * Fill entire display with a single byte value
+ * @param fill_byte Byte to fill (4bpp BWR: 0x00=black, 0x33=white, 0x44=red)
+ * Useful for testing without needing a full framebuffer
+ */
+void uc8159_fill(uint8_t fill_byte);
 
 #endif // OEPL_DISPLAY_DRIVER_UC8159_600X448_H

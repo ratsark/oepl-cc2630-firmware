@@ -39,6 +39,10 @@ void oepl_hw_init(void);
 void oepl_hw_spi_init(void);
 void oepl_hw_spi_transfer(const uint8_t* data, size_t len);
 void oepl_hw_spi_transfer_read(uint8_t* data, size_t len);
+void oepl_hw_spi_cs_assert(void);
+void oepl_hw_spi_cs_deassert(void);
+void oepl_hw_spi_send_raw(const uint8_t* data, size_t len);
+void oepl_hw_spi_read_raw(uint8_t* data, size_t len);
 
 /**
  * GPIO Functions

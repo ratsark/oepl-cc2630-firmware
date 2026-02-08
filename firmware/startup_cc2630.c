@@ -116,6 +116,14 @@ void (* const vectors[])(void) = {
 // Reset Handler - NO SetupTrimDevice!
 void Reset_Handler(void)
 {
+    // CRITICAL: Reset VTOR to flash (0x00000000).
+    // The CC2630 ROM bootloader sets VTOR = 0x20000000 and copies its own
+    // vector table there. Our .data section also starts at 0x20000000, so
+    // when we copy .data below, we'd overwrite the vector table with RTT
+    // data, causing any interrupt to crash. Setting VTOR = 0 ensures the
+    // CPU uses our vector table in flash.
+    *(volatile uint32_t *)0xE000ED08 = 0x00000000;
+
     // Apply factory trim values - essential for I/O drivers and clocks.
     // Using cc26x0 driverlib (NOT cc13x1_cc26x1 which halts on CC2630).
     NOROM_SetupTrimDevice();
