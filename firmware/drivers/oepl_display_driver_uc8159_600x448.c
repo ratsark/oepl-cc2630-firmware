@@ -192,8 +192,8 @@ void uc8159_init(void)
     wait_busy(5000, "PON1_W");
 
     // 5. Register configuration (stock firmware values)
-    // Panel Setting: 0xC7 (stock, was 0xE7 in v29)
-    { uint8_t d[] = {0xC7, 0x08}; epd_write(0x00, d, 2); }
+    // Panel Setting (stock=0xC7, fix HM: SHL=0 for correct left-to-right source shift)
+    { uint8_t d[] = {0xC3, 0x08}; epd_write(0x00, d, 2); }
     // Power Setting
     { uint8_t d[] = {0x37, 0x00, 0x05, 0x05}; epd_write(0x01, d, 4); }
     // Power Off Sequence

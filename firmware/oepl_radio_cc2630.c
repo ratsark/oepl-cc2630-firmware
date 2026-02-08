@@ -283,10 +283,17 @@ static uint8_t mac_hdr_size(const uint8_t *pkt, uint8_t pkt_len)
     return sz;
 }
 
-bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_type,
-                               uint8_t *block_buf, uint16_t *out_size)
+uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_type,
+                                  uint8_t *block_buf, uint8_t *parts_rcvd)
 {
-    if (!radio_st.ap_found) return false;
+    if (!radio_st.ap_found) return 0;
+
+    // Count parts already received (from prior attempts)
+    uint8_t total_parts = 0;
+    for (uint8_t i = 0; i < BLOCK_MAX_PARTS; i++) {
+        if (parts_rcvd[i / 8] & (1 << (i % 8))) total_parts++;
+    }
+    if (total_parts >= BLOCK_MAX_PARTS) return total_parts;
 
     struct MacFrameNormal *hdr = (struct MacFrameNormal *)tx_frame;
     build_unicast_header(hdr, radio_st.ap_mac);
@@ -297,9 +304,10 @@ bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_
     breq->ver = data_ver;
     breq->blockId = block_id;
     breq->type = data_type;
-    // Request all parts (set bits 0-41)
-    memset(breq->requestedParts, 0xFF, BLOCK_REQ_PARTS_BYTES);
-    breq->requestedParts[5] &= 0x03;
+    // Request only missing parts (complement of parts_rcvd)
+    for (uint8_t i = 0; i < BLOCK_REQ_PARTS_BYTES; i++)
+        breq->requestedParts[i] = ~parts_rcvd[i];
+    breq->requestedParts[5] &= 0x03;  // Only bits 0-41 valid
     add_crc(breq, sizeof(struct BlockRequest));
 
     uint8_t tx_len = sizeof(struct MacFrameNormal) + 1 + sizeof(struct BlockRequest);
@@ -309,22 +317,18 @@ bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_
 
     // Single long RX session: covers ack + wait + all parts (15s)
     rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 15000000);
-    if (rc != RF_OK) { rtt_puts(" RXfail\r\n"); return false; }
+    if (rc != RF_OK) { rtt_puts(" RXfail\r\n"); return total_parts; }
 
     // TX block request
     rc = oepl_rf_tx(tx_frame, tx_len);
     if (rc != RF_OK) {
         oepl_rf_rx_stop();
         rtt_puts(" TXfail\r\n");
-        return false;
+        return total_parts;
     }
     rtt_puts(" TX+\r\n");
 
     // Receive ack + parts in one continuous RX session
-    uint8_t parts_received[BLOCK_REQ_PARTS_BYTES];
-    memset(parts_received, 0, sizeof(parts_received));
-    uint8_t total_parts = 0;
-    memset(block_buf, 0x00, BLOCK_DATA_SIZE);
     bool got_ack = false;
     uint8_t other_pkts = 0;
 
@@ -363,8 +367,8 @@ bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_
 
                     uint8_t byte_idx = bp->blockPart / 8;
                     uint8_t bit_idx = bp->blockPart % 8;
-                    if (!(parts_received[byte_idx] & (1 << bit_idx))) {
-                        parts_received[byte_idx] |= (1 << bit_idx);
+                    if (!(parts_rcvd[byte_idx] & (1 << bit_idx))) {
+                        parts_rcvd[byte_idx] |= (1 << bit_idx);
                         total_parts++;
                     }
                 }
@@ -388,8 +392,7 @@ bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_
     if (other_pkts) { rtt_puts(" oth="); rtt_put_hex8(other_pkts); }
     rtt_puts("\r\n");
 
-    *out_size = BLOCK_DATA_SIZE;
-    return total_parts > 0;
+    return total_parts;
 }
 
 radio_state_t *oepl_radio_get_state(void)

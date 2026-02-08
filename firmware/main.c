@@ -50,14 +50,6 @@ static void print_mac_msb(const uint8_t *mac_lsb)
     }
 }
 
-// Fill display with a test pattern
-static void display_test_pattern(void)
-{
-    rtt_puts("\r\n--- DISPLAY TEST ---\r\n");
-    uc8159_fill(0x33);  // All white (4bpp BWR: 0x00=black, 0x33=white, 0x44=red)
-    rtt_puts("Display test complete\r\n");
-}
-
 static bool do_scan_and_checkin(struct AvailDataInfo *info)
 {
     // Scan for AP
@@ -91,22 +83,33 @@ static bool do_scan_and_checkin(struct AvailDataInfo *info)
 }
 
 // Download a specific block into a buffer, with retries
+// Accumulates parts across attempts — missing parts requested on retry
 static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
                             uint8_t *buf, uint16_t *out_size)
 {
     rtt_puts("B");
     rtt_put_hex8(block_id);
 
+    uint8_t parts_rcvd[BLOCK_REQ_PARTS_BYTES];
+    memset(parts_rcvd, 0, sizeof(parts_rcvd));
+    memset(buf, 0x00, BLOCK_DATA_SIZE);
+
     for (uint8_t attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             rtt_puts("R");
-            // Increasing backoff: 500ms first 4, then 1s, then 2s
-            uint16_t delay = (attempt < 5) ? 500 : (attempt < 10) ? 1000 : 2000;
-            oepl_hw_delay_ms(delay);
+            oepl_hw_delay_ms(500);
         }
-        if (oepl_radio_request_block(block_id, info->dataVer, info->dataType,
-                                      buf, out_size)) {
+        uint8_t got = oepl_radio_request_block(block_id, info->dataVer, info->dataType,
+                                                buf, parts_rcvd);
+        if (got >= BLOCK_MAX_PARTS) {
             rtt_puts("+");
+            *out_size = BLOCK_DATA_SIZE;
+            return true;
+        }
+        // Accept 41/42 only after 8 attempts
+        if (got >= BLOCK_MAX_PARTS - 1 && attempt >= 7) {
+            rtt_puts("~");
+            *out_size = BLOCK_DATA_SIZE;
             return true;
         }
     }
@@ -235,7 +238,7 @@ static bool download_and_display(struct AvailDataInfo *info)
             memset(red_line, 0, row_bytes);
         }
 
-        // Convert to 4bpp
+        // Convert to 4bpp (GD bit handles orientation)
         for (uint8_t x = 0; x < row_bytes; x++) {
             bwr_to_4bpp(bw_line[x], red_line[x], &row_4bpp[x * 4]);
         }
@@ -355,9 +358,10 @@ int main(void)
                 rtt_puts("No pending data\r\n");
             }
 
-            // Wait nextCheckIn seconds (minimum 30s for testing)
+            // Wait nextCheckIn seconds (clamped for testing)
             uint16_t wait_sec = info.nextCheckIn;
             if (wait_sec < 30) wait_sec = 30;
+            if (wait_sec > 60) wait_sec = 60;
             rtt_puts("Sleep ");
             rtt_put_hex8((wait_sec >> 8) & 0xFF);
             rtt_put_hex8(wait_sec & 0xFF);

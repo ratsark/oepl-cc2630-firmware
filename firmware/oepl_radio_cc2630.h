@@ -134,9 +134,10 @@ int8_t oepl_radio_scan_channels(void);
 bool oepl_radio_checkin(struct AvailDataInfo *out_info);
 
 // Send BlockRequest, receive block parts
-// Returns true if block received successfully
-bool oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_type,
-                               uint8_t *block_buf, uint16_t *out_size);
+// parts_rcvd is in/out bitmap — accumulates across retries
+// Returns number of parts received so far (caller checks >= BLOCK_MAX_PARTS)
+uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t data_type,
+                                  uint8_t *block_buf, uint8_t *parts_rcvd);
 
 // Send XferComplete
 bool oepl_radio_send_xfer_complete(void);
