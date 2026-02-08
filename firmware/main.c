@@ -23,10 +23,10 @@
 #define PRCM_O_GPIOCLKGR        0x48
 #define PRCM_O_CLKLOADCTL       0x28
 
-// Block buffers for image download (4KB each)
+// Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
 // bw_buf: cached B/W block, red_buf: cached Red block
-static uint8_t bw_buf[BLOCK_DATA_SIZE];
-static uint8_t red_buf[BLOCK_DATA_SIZE];
+static uint8_t bw_buf[BLOCK_XFER_BUFFER_SIZE];
+static uint8_t red_buf[BLOCK_XFER_BUFFER_SIZE];
 static int8_t bw_cache_id, red_cache_id;  // which block ID is cached (-1 = none)
 
 static void delay_cycles(volatile uint32_t n)
@@ -92,7 +92,7 @@ static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
 
     uint8_t parts_rcvd[BLOCK_REQ_PARTS_BYTES];
     memset(parts_rcvd, 0, sizeof(parts_rcvd));
-    memset(buf, 0x00, BLOCK_DATA_SIZE);
+    memset(buf, 0x00, BLOCK_XFER_BUFFER_SIZE);
 
     for (uint8_t attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
@@ -103,13 +103,13 @@ static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
                                                 buf, parts_rcvd);
         if (got >= BLOCK_MAX_PARTS) {
             rtt_puts("+");
-            *out_size = BLOCK_DATA_SIZE;
+            *out_size = BLOCK_XFER_BUFFER_SIZE;
             return true;
         }
         // Accept 41/42 only after 8 attempts
         if (got >= BLOCK_MAX_PARTS - 1 && attempt >= 7) {
             rtt_puts("~");
-            *out_size = BLOCK_DATA_SIZE;
+            *out_size = BLOCK_XFER_BUFFER_SIZE;
             return true;
         }
     }
@@ -137,7 +137,9 @@ static bool ensure_red_block(uint8_t block_id, struct AvailDataInfo *info)
     return true;
 }
 
-// Get bytes from the image at a given offset, using cached blocks
+// Get bytes from the image at a given offset, using cached blocks.
+// Each block has a 4-byte BlockData header (size + checksum) followed by
+// BLOCK_DATA_SIZE bytes of actual image data. We skip the header.
 static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
                              struct AvailDataInfo *info, bool is_red_plane)
 {
@@ -156,7 +158,8 @@ static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
             cache = bw_buf;
         }
 
-        memcpy(out, &cache[block_off], avail);
+        // Skip BLOCK_HEADER_SIZE (4 bytes) at start of each block
+        memcpy(out, &cache[BLOCK_HEADER_SIZE + block_off], avail);
         out += avail;
         offset += avail;
         len -= avail;

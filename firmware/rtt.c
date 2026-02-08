@@ -8,7 +8,7 @@
 #include "rtt.h"
 
 // Ring buffer size — must be power of 2 for efficient masking
-#define RTT_BUFFER_SIZE 4096
+#define RTT_BUFFER_SIZE 512
 
 // RTT buffer descriptor (matches SEGGER's layout exactly)
 typedef struct {

@@ -62,6 +62,12 @@ static dataQueue_t rx_queue;
 // TX buffer
 static uint8_t tx_buf[128];
 
+// Local extended address (for RX frame filtering)
+static uint64_t local_ext_addr;
+
+// PAN ID for frame filtering (must match protocol)
+#define PROTO_PAN_ID 0x4447
+
 // -----------------------------------------------------------------------------
 //  Internal helpers
 // -----------------------------------------------------------------------------
@@ -239,6 +245,9 @@ rf_status_t oepl_rf_init(void)
     rx_queue.pCurrEntry = (uint8_t *)rx_entry;
     rx_queue.pLastEntry = NULL;
 
+    // Read local extended address from FCFG1 for RX frame filtering
+    local_ext_addr = (uint64_t)FCFG1_MAC_15_4_0 | ((uint64_t)FCFG1_MAC_15_4_1 << 32);
+
     return RF_OK;
 }
 
@@ -375,19 +384,24 @@ rf_status_t oepl_rf_rx_start(uint8_t ieee_channel, uint32_t timeout_us)
     rf_cmd_rx.pRxQ = &rx_queue;
     rf_cmd_rx.pOutput = &rf_rx_output;
 
-    // Disable frame filtering (accept everything)
-    rf_cmd_rx.frameFiltOpt.frameFiltEn = 0;
+    // Enable frame filtering: accept only packets addressed to us or broadcast
+    rf_cmd_rx.frameFiltOpt.frameFiltEn = 1;
+    rf_cmd_rx.frameFiltOpt.frameFiltStop = 0;   // Still receive full frame even if rejected (we flush)
     rf_cmd_rx.frameFiltOpt.autoAckEn = 0;
+    rf_cmd_rx.frameFiltOpt.maxFrameVersion = 1; // Accept 802.15.4-2003 and -2006
+    rf_cmd_rx.localExtAddr = local_ext_addr;
+    rf_cmd_rx.localShortAddr = 0xFFFE;          // No short address
+    rf_cmd_rx.localPanID = PROTO_PAN_ID;
 
-    // Accept all frame types
-    rf_cmd_rx.frameTypes.bAcceptFt0Beacon = 1;
+    // Accept data and ACK frames only
+    rf_cmd_rx.frameTypes.bAcceptFt0Beacon = 0;
     rf_cmd_rx.frameTypes.bAcceptFt1Data = 1;
     rf_cmd_rx.frameTypes.bAcceptFt2Ack = 1;
-    rf_cmd_rx.frameTypes.bAcceptFt3MacCmd = 1;
-    rf_cmd_rx.frameTypes.bAcceptFt4Reserved = 1;
-    rf_cmd_rx.frameTypes.bAcceptFt5Reserved = 1;
-    rf_cmd_rx.frameTypes.bAcceptFt6Reserved = 1;
-    rf_cmd_rx.frameTypes.bAcceptFt7Reserved = 1;
+    rf_cmd_rx.frameTypes.bAcceptFt3MacCmd = 0;
+    rf_cmd_rx.frameTypes.bAcceptFt4Reserved = 0;
+    rf_cmd_rx.frameTypes.bAcceptFt5Reserved = 0;
+    rf_cmd_rx.frameTypes.bAcceptFt6Reserved = 0;
+    rf_cmd_rx.frameTypes.bAcceptFt7Reserved = 0;
 
     // CCA configuration omitted for now — keep defaults (all disabled)
 

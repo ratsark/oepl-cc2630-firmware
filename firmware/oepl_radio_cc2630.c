@@ -356,13 +356,14 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
                 rtt_put_hex8((ack->pleaseWaitMs >> 8) & 0xFF);
                 rtt_put_hex8(ack->pleaseWaitMs & 0xFF);
                 rtt_puts("\r\n");
-            } else if (pkt_type == PKT_BLOCK_PART && pkt_len >= hsz + 1 + 3) {
+            } else if (pkt_type == PKT_BLOCK_PART &&
+                       pkt_len >= hsz + 1 + sizeof(struct BlockPart)) {
                 struct BlockPart *bp = (struct BlockPart *)&pkt[hsz + 1];
                 if (bp->blockId == block_id && bp->blockPart < BLOCK_MAX_PARTS) {
                     uint16_t offset = (uint16_t)bp->blockPart * BLOCK_PART_DATA_SIZE;
                     uint16_t copy_len = BLOCK_PART_DATA_SIZE;
-                    if (offset + copy_len > BLOCK_DATA_SIZE)
-                        copy_len = BLOCK_DATA_SIZE - offset;
+                    if (offset + copy_len > BLOCK_XFER_BUFFER_SIZE)
+                        copy_len = BLOCK_XFER_BUFFER_SIZE - offset;
                     memcpy(&block_buf[offset], bp->data, copy_len);
 
                     uint8_t byte_idx = bp->blockPart / 8;

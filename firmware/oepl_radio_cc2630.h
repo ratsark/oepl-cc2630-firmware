@@ -26,6 +26,8 @@
 #define BLOCK_PART_DATA_SIZE    99
 #define BLOCK_MAX_PARTS         42
 #define BLOCK_DATA_SIZE         4096UL
+#define BLOCK_HEADER_SIZE       4       // struct BlockData header (size + checksum)
+#define BLOCK_XFER_BUFFER_SIZE  (BLOCK_DATA_SIZE + BLOCK_HEADER_SIZE)  // 4100
 #define BLOCK_REQ_PARTS_BYTES   6
 
 // Wakeup reasons
