@@ -36,7 +36,7 @@ void Default_Handler(void);
 
 // Cortex-M3 core handlers
 void NMI_Handler(void) __attribute__((weak, alias("Default_Handler")));
-void HardFault_Handler(void) __attribute__((weak, alias("Default_Handler")));
+void HardFault_Handler(void); // Defined below with RTT diagnostics
 void MemManage_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void BusFault_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void UsageFault_Handler(void) __attribute__((weak, alias("Default_Handler")));
@@ -147,7 +147,29 @@ void Reset_Handler(void)
     while (1) { __asm volatile ("nop"); }
 }
 
+// Declared in rtt.c
+extern void rtt_puts(const char *s);
+extern void rtt_put_hex8(uint8_t v);
+extern void rtt_put_hex32(uint32_t v);
+
+void HardFault_Handler(void)
+{
+    // Read stacked registers from MSP
+    uint32_t *sp;
+    __asm volatile ("mrs %0, msp" : "=r" (sp));
+
+    rtt_puts("\r\n!!! HARDFAULT !!!\r\n");
+    rtt_puts("PC="); rtt_put_hex32(sp[6]); rtt_puts("\r\n");
+    rtt_puts("LR="); rtt_put_hex32(sp[5]); rtt_puts("\r\n");
+    rtt_puts("SP="); rtt_put_hex32((uint32_t)sp); rtt_puts("\r\n");
+    rtt_puts("CFSR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED28); rtt_puts("\r\n");
+    rtt_puts("BFAR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED38); rtt_puts("\r\n");
+
+    while (1) { __asm volatile ("nop"); }
+}
+
 void Default_Handler(void)
 {
+    rtt_puts("\r\n!!! DEFAULT IRQ !!!\r\n");
     while (1) { __asm volatile ("nop"); }
 }
