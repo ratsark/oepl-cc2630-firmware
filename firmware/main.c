@@ -13,15 +13,13 @@
 #include "oepl_hw_abstraction_cc2630.h"
 #include "drivers/oepl_display_driver_uc8159_600x448.h"
 
-#define HWREG(addr) (*((volatile uint32_t *)(addr)))
+// TI driverlib
+#include "sys_ctrl.h"
 
-// --- PRCM ---
-#define PRCM_BASE               0x40082000
-#define PRCM_NONBUF_BASE        0x60082000
-#define PRCM_O_PDCTL0PERIPH     0x138
-#define PRCM_O_PDSTAT0PERIPH    0x14C
-#define PRCM_O_GPIOCLKGR        0x48
-#define PRCM_O_CLKLOADCTL       0x28
+// PRCM registers (now from driverlib includes via sys_ctrl.h)
+#include "prcm.h"
+#include "hw_memmap.h"
+#include "hw_prcm.h"
 
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
 // bw_buf: cached B/W block, red_buf: cached Red block
@@ -34,11 +32,25 @@ static void delay_cycles(volatile uint32_t n)
     while (n--) __asm volatile ("nop");
 }
 
-static void delay_seconds(uint32_t sec)
+// Enter low-power sleep with timed wakeup after `seconds` seconds.
+// Shuts down RF core (~8mA savings) and busy-waits.
+// TODO: Investigate why AON_RTC CH0 compare event never fires on this chip,
+// then switch to WFI for lower CPU power during sleep.
+static void enter_sleep(uint32_t seconds)
 {
-    // ~8M cycles per second at 48MHz (loop + nop ~= 6 cycles)
-    for (uint32_t i = 0; i < sec; i++)
+    rtt_puts("SLEEP ");
+    rtt_put_hex8((seconds >> 8) & 0xFF);
+    rtt_put_hex8(seconds & 0xFF);
+    rtt_puts("s\r\n");
+
+    // Shutdown RF core (biggest power consumer)
+    oepl_rf_shutdown();
+
+    // Busy-wait with RF off
+    for (uint32_t s = 0; s < seconds; s++)
         delay_cycles(8000000);
+
+    rtt_puts("WAKE\r\n");
 }
 
 static void print_mac_msb(const uint8_t *mac_lsb)
@@ -288,7 +300,7 @@ static bool download_and_display(struct AvailDataInfo *info)
 
 int main(void)
 {
-    // --- Init RTT ---
+    // --- Init RTT first (so we can debug early) ---
     rtt_init();
 
     // --- Power up PERIPH domain (for GPIO) ---
@@ -302,11 +314,14 @@ int main(void)
     for (volatile uint32_t i = 0; i < 500000; i++)
         if (HWREG(PRCM_BASE + PRCM_O_CLKLOADCTL) & 0x02) break;
 
-    // --- Startup delay (allow RTT connection) ---
+    // Wait for RTT client to connect
     delay_cycles(24000000);  // ~3 seconds
 
     // --- Boot message ---
     rtt_puts("\r\n=== CC2630 OEPL Tag ===\r\n");
+    rtt_puts("RST=");
+    rtt_put_hex8((uint8_t)SysCtrlResetSourceGet());
+    rtt_puts("\r\n");
 
     // Print MAC in human-readable form
     uint8_t mac[8];
@@ -333,7 +348,10 @@ int main(void)
     oepl_radio_init();
 
     // --- Main loop: periodic checkin + download ---
+    // First 2 checkins use busy-wait (keeps JLink/RTT alive for debugging).
+    // After that, use WFI sleep (CPU halts, RF powered off, RTC wakeup).
     uint32_t checkin_count = 0;
+    bool use_sleep = false;
     while (1) {
         rtt_puts("\r\n=== Checkin #");
         rtt_put_hex32(checkin_count);
@@ -342,7 +360,9 @@ int main(void)
         struct AvailDataInfo info;
         memset(&info, 0, sizeof(info));
 
-        if (do_scan_and_checkin(&info)) {
+        bool checkin_ok = do_scan_and_checkin(&info);
+
+        if (checkin_ok) {
             rtt_puts("Checkin OK: dataType=");
             rtt_put_hex8(info.dataType);
             rtt_puts(" nextCheckIn=");
@@ -351,7 +371,6 @@ int main(void)
             rtt_puts("\r\n");
 
             if (info.dataType != DATATYPE_NOUPDATE) {
-                // AP has data for us — download and display it
                 if (download_and_display(&info)) {
                     rtt_puts("*** IMAGE DISPLAYED ***\r\n");
                 } else {
@@ -361,21 +380,45 @@ int main(void)
                 rtt_puts("No pending data\r\n");
             }
 
-            // Wait nextCheckIn seconds (clamped for testing)
             uint16_t wait_sec = info.nextCheckIn;
             if (wait_sec < 30) wait_sec = 30;
-            if (wait_sec > 60) wait_sec = 60;
-            rtt_puts("Sleep ");
-            rtt_put_hex8((wait_sec >> 8) & 0xFF);
-            rtt_put_hex8(wait_sec & 0xFF);
-            rtt_puts("s\r\n");
-            delay_seconds(wait_sec);
+            if (wait_sec > 3600) wait_sec = 3600;
+
+            if (use_sleep) {
+                enter_sleep(wait_sec);
+            } else {
+                rtt_puts("Sleep ");
+                rtt_put_hex8((wait_sec >> 8) & 0xFF);
+                rtt_put_hex8(wait_sec & 0xFF);
+                rtt_puts("s (busy)\r\n");
+                for (uint32_t s = 0; s < wait_sec; s++)
+                    delay_cycles(8000000);
+            }
         } else {
-            rtt_puts("Checkin failed, retry in 30s\r\n");
-            delay_seconds(30);
+            if (use_sleep) {
+                rtt_puts("Checkin failed, retry in 30s\r\n");
+                enter_sleep(30);
+            } else {
+                rtt_puts("Checkin failed, retry in 30s (busy)\r\n");
+                for (uint32_t s = 0; s < 30; s++)
+                    delay_cycles(8000000);
+            }
+        }
+
+        // After WFI sleep, RF core was shut down — re-init before next checkin
+        if (use_sleep) {
+            rc = oepl_rf_init();
+            if (rc != RF_OK) {
+                rtt_puts("RF re-init FAILED\r\n");
+                goto idle;
+            }
+            oepl_radio_init();
         }
 
         checkin_count++;
+        if (checkin_count >= 2) {
+            use_sleep = true;
+        }
     }
 
 idle:

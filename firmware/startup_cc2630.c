@@ -69,6 +69,8 @@ void SW_Event0_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void AUX_Comb_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void AON_Prog_Handler(void) __attribute__((weak, alias("Default_Handler")));
 
+void AON_RTC_Handler(void) __attribute__((weak, alias("Default_Handler")));
+
 // Vector Table
 __attribute__((section(".vectors"), used))
 void (* const vectors[])(void) = {
@@ -85,17 +87,18 @@ void (* const vectors[])(void) = {
     0,
     PendSV_Handler,
     SysTick_Handler,
-    // CC2630 peripheral interrupts
-    GPIO_Handler,       // 16
-    I2C_Handler,        // 17
-    RF_CPE0_Handler,    // 18
-    0,                  // 19
-    RF_CPE1_Handler,    // 20
-    0, 0,               // 21-22
-    SSI0_Handler,       // 23
-    SSI1_Handler,       // 24
-    UART0_Handler,      // 25
-    0, 0, 0, 0, 0,     // 26-30
+    // CC2630 peripheral interrupts (per hw_ints.h)
+    GPIO_Handler,       // 16: INT_AON_GPIO_EDGE (IRQ 0)
+    I2C_Handler,        // 17: INT_I2C_IRQ (IRQ 1)
+    RF_CPE1_Handler,    // 18: INT_RFC_CPE_1 (IRQ 2)
+    0,                  // 19: reserved (IRQ 3)
+    AON_RTC_Handler,    // 20: INT_AON_RTC_COMB (IRQ 4)
+    UART0_Handler,      // 21: INT_UART0_COMB (IRQ 5)
+    0,                  // 22: INT_AUX_SWEV0 (IRQ 6)
+    SSI0_Handler,       // 23: INT_SSI0_COMB (IRQ 7)
+    SSI1_Handler,       // 24: INT_SSI1_COMB (IRQ 8)
+    RF_CPE0_Handler,    // 25: INT_RFC_CPE_0 (IRQ 9)
+    0, 0, 0, 0, 0,     // 26-30: RFC_HW, RFC_CMD_ACK, I2S, AUX_SWEV1, WDT
     Timer0A_Handler,    // 31
     Timer0B_Handler,    // 32
     Timer1A_Handler,    // 33
