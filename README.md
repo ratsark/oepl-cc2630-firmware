@@ -1,84 +1,69 @@
 # OpenEPaperLink Firmware for CC2630 (TG-GR6000N)
 
-Custom open-source OEPL firmware for the Solum TG-GR6000N 6.0" e-paper tag.
+Custom open-source OEPL firmware for the Solum TG-GR6000N 6.0" BWR e-paper tag.
 
 ## Hardware
 
-- **Chip**: Texas Instruments CC2630F128 (ARM Cortex-M3, 128KB Flash, 20KB RAM)
+- **Chip**: Texas Instruments CC2630F128 (ARM Cortex-M3, 48MHz, 128KB Flash, 20KB RAM)
 - **Radio**: 2.4 GHz IEEE 802.15.4 (OEPL protocol)
-- **Display**: 6.0" UC8159 e-paper controller, 600x448 monochrome
-- **Model**: Solum TG-GR6000N
+- **Display**: 6.0" UC8159 e-paper controller, 600x448 BWR (black/white/red)
+- **Model**: Solum TG-GR6000N (hwType 0x35)
+- **MAC**: 00:12:4B:00:18:18:80:B0
+
+## Current Status
+
+**Fully working end-to-end.** The tag receives images from the OEPL AP and displays them.
+
+- [x] RF core boot and IEEE 802.15.4 radio
+- [x] AP channel scanning (6 channels: 11, 15, 20, 25, 26, 27)
+- [x] OEPL checkin protocol (AvailDataReq/AvailDataInfo)
+- [x] Block transfer with cumulative part tracking (42 parts/block)
+- [x] UC8159 display driver with OTP waveform loading
+- [x] BWR (black/white/red) image display - 1bpp per layer, 17 blocks
+- [x] Sleep mode with RF shutdown between checkins
+- [x] CCFG backdoor enabled (DIO11 LOW enters bootloader)
+- [x] SEGGER RTT debug output (512-byte buffer)
+- [x] UART TX debug output on DIO3 at 115200 baud
+
+**Firmware size**: ~11.8KB flash, 20KB RAM (fits CC2630F128 limits)
 
 ## Project Structure
 
 ```
 oepl-cc2630-firmware/
 ├── Makefile              Build system
-├── openocd.cfg           JTAG debug configuration (J-Link + CC26x0)
 ├── firmware/             Source code
-│   ├── main.c            Entry point and test patterns
-│   ├── startup_cc2630.c  Reset handler and vector table
-│   ├── ccfg.c            CC2630 customer configuration (bootloader settings)
+│   ├── main.c            Entry point, checkin loop, download+display
+│   ├── startup_cc2630.c  Reset handler, vector table, HardFault handler
+│   ├── ccfg.c            CC2630 customer configuration
 │   ├── cc2630f128.lds    Linker script
-│   ├── oepl_app.c/h      OEPL application state machine
-│   ├── oepl_radio_cc2630.c/h    Radio interface (2.4 GHz 802.15.4)
-│   ├── oepl_hw_abstraction_cc2630.c/h  Hardware abstraction layer
-│   ├── oepl_nvm_cc2630.c/h      Non-volatile memory (flash storage)
-│   ├── oepl_compression.c/h     Image decompression
+│   ├── rtt.c/h           SEGGER RTT + UART TX debug output
+│   ├── oepl_radio_cc2630.c/h    OEPL radio protocol (scan, checkin, blocks)
+│   ├── oepl_rf_cc2630.c/h       Low-level RF core driver
+│   ├── oepl_hw_abstraction_cc2630.c/h  GPIO, SPI, delays
 │   └── drivers/
-│       ├── oepl_display_driver_uc8159_600x448.c/h   UC8159 display driver
-│       └── oepl_display_driver_common_cc2630.c/h     Display abstraction
+│       └── oepl_display_driver_uc8159_600x448.c/h  UC8159 display driver
+├── binaries/             Pre-built firmware binary
 ├── docs/                 Analysis and development documentation
 ├── reference/            Stock firmware binaries and OEPL reference binary
-└── tools/                Utility scripts (D/L pin control, etc.)
+└── tools/                Utility scripts
+    ├── flash.sh          UART bootloader flash script
+    ├── dl_pin.sh         D/L pin (GPIO17) control
+    └── start_fw.jlink    JLink firmware launch script
 ```
 
 ## Build Requirements
 
-### TI SimpleLink SDK (driverlib)
-
-```bash
-# Sparse clone the SDK (only driverlib, ~few MB)
-cd ~/Code
-mkdir -p ti && cd ti
-git clone --filter=blob:none --sparse --branch lpf2-8.32.00.07 --depth 1 \
-    https://github.com/TexasInstruments/cc13xx_cc26xx_sdk.git \
-    simplelink_cc13xx_cc26xx_sdk_8_32_00_07
-cd simplelink_cc13xx_cc26xx_sdk_8_32_00_07
-git sparse-checkout set source/ti/devices/cc13x1_cc26x1
-```
-
-Then build the driverlib (needs to be done once):
-```bash
-SDK_DIR=~/Code/ti/simplelink_cc13xx_cc26xx_sdk_8_32_00_07
-DRIVERLIB_DIR=$SDK_DIR/source/ti/devices/cc13x1_cc26x1/driverlib
-mkdir -p $DRIVERLIB_DIR/bin/gcc
-
-for f in $DRIVERLIB_DIR/*.c; do
-    arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -Os -ffunction-sections -fdata-sections \
-        -DDeviceFamily_CC26X1 -I$SDK_DIR/source \
-        -c "$f" -o "$DRIVERLIB_DIR/bin/gcc/$(basename "$f" .c).o"
-done
-
-arm-none-eabi-ar rcs $DRIVERLIB_DIR/bin/gcc/driverlib.lib $DRIVERLIB_DIR/bin/gcc/*.o
-```
-
 ### ARM Toolchain
 
 ```bash
-# Debian/Raspberry Pi
 sudo apt install gcc-arm-none-eabi gdb-multiarch libnewlib-arm-none-eabi
 ```
 
-### Programming Tools
+### TI Driverlib
 
-```bash
-# UART bootloader programmer
-pip3 install cc2538-bsl
-
-# OpenOCD for JTAG (optional, for J-Link debugging)
-sudo apt install openocd
-```
+The CC26x0 driverlib must be built at `~/Code/ti/cc26x0/driverlib/`.
+See `docs/BUILD_STATUS.md` for details.
 
 ## Building
 
@@ -90,74 +75,85 @@ make clean              # Clean build artifacts
 
 ## Programming
 
-### Via UART Bootloader
+### Via J-Link (cJTAG) - Recommended
 
-The D/L pin must be pulled low to enter bootloader mode on power-up.
-On the Raspberry Pi, D/L is connected to GPIO 17:
-
-```bash
-# Enter bootloader mode
-./tools/dl_pin.sh low
-# Power cycle the tag, then:
-make program SERIAL_PORT=/dev/ttyUSB0
-
-# Return to normal boot
-./tools/dl_pin.sh high
-# Power cycle the tag
-```
-
-### Via JTAG (J-Link)
+Requires SEGGER J-Link connected via cJTAG (2-wire).
 
 ```bash
-make jtag-flash         # Flash via JTAG
+# Start GDB server
+JLinkGDBServer -device CC2630F128 -if cJTAG -speed 1000 \
+  -port 2331 -RTTTelnetPort 19021 -notimeout &
+
+# Flash and start firmware
+gdb-multiarch -batch -nx \
+  -ex "file build/Tag_FW_CC2630_TG-GR6000N.elf" \
+  -ex "target remote :2331" \
+  -ex "monitor halt" \
+  -ex "monitor flash erase" \
+  -ex "load" \
+  -ex "set \$pc = 0x000000bc" \
+  -ex "set \$sp = 0x20005000" \
+  -ex "monitor go" \
+  -ex "disconnect"
 ```
 
-## Debugging (JTAG)
+**Important**: Always `monitor flash erase` before `load` to avoid stale flash corruption.
+
+**Note**: `monitor reset` does NOT work reliably on CC2630. Must set PC/SP manually.
+
+### Via UART Bootloader (cc2538-bsl)
+
+Requires CCFG backdoor enabled (byte 48 = 0xC5) in the currently-flashed firmware.
+The D/L pin (DIO11) is controlled by Raspberry Pi GPIO17.
 
 ```bash
-# Terminal 1: Start OpenOCD debug server
-make debug-server
-
-# Terminal 2: Connect GDB
-make debug
+./tools/flash.sh binaries/Tag_FW_CC2630_TG-GR6000N.bin /dev/ttyUSB0
 ```
 
-In GDB:
-```
-(gdb) monitor halt
-(gdb) info registers
-(gdb) break main
-(gdb) continue
+## Debugging
+
+### RTT (with J-Link)
+
+```bash
+# Read RTT output (requires JLinkGDBServer running)
+timeout 30 bash -c 'exec 3<>/dev/tcp/localhost/19021; cat <&3'
+
+# Or use JLinkRTTClient
+JLinkRTTClient
 ```
 
-## Status
+### UART
 
-- [x] Stock firmware dumped and analyzed
-- [x] Display init sequence extracted from stock firmware
-- [x] GPIO mapping partially documented
-- [x] Firmware compiles
-- [ ] **JTAG debugging** - debugger arrived, need to verify basic execution
-- [ ] **GPIO pin mapping** - need to confirm with JTAG/logic analyzer
-- [ ] **Display test** - show test pattern on screen
-- [ ] **Radio communication** - 2.4 GHz OEPL protocol
-- [ ] **Full OEPL integration**
+Debug output also goes to UART0 TX (DIO3) at 115200 baud, compatible with
+the FTDI adapter used for cc2538-bsl flashing.
+
+## Pin Assignments
+
+| DIO | Function | Notes |
+|-----|----------|-------|
+| 2   | UART RX  | cc2538-bsl / debug |
+| 3   | UART TX  | cc2538-bsl / debug |
+| 5   | EPD Power | Enable (tentative) |
+| 8   | SPI MISO | |
+| 9   | SPI MOSI | |
+| 10  | SPI CLK  | |
+| 11  | Flash CS / D/L | Dual-use: SPI CS for flash, bootloader entry |
+| 12  | DIR      | LOW = write |
+| 13  | BUSY     | Input, HIGH = not busy |
+| 14  | RST      | Active LOW |
+| 15  | DC       | Data/Command |
+| 18  | BS1      | LOW = 4-wire SPI |
+| 20  | EPD CS   | GPIO output (not SSI0 FSS) |
 
 ## Known Issues
 
-- **Framebuffer**: 600x448 = 33.6 KB exceeds 20 KB RAM. Must use line-by-line streaming.
-- **Pin mapping unconfirmed**: GPIO assignments are educated guesses from stock firmware analysis.
-- **One device bricked**: CCFG byte 51 was changed to 0x00, disabling ROM bootloader. Recoverable via JTAG.
+- **DIO13 (BUSY)** always reads HIGH — likely FPC cable or hardware issue. Display refreshes work but BUSY polling runs to full timeout.
+- **AON_RTC CH0 compare** event doesn't fire — using busy-wait sleep as workaround.
+- **Channel 11 congestion** — 29 tags on channel 11, causing occasional part loss (41/42 typical, needs 2-3 retries per block).
+- **UART TX output** not verified working yet (RTT works reliably).
 
 ## Based On
 
 - [OpenEPaperLink](https://github.com/OpenEPaperLink/OpenEPaperLink) project
 - CC2630 OEPL alpha firmware (reference binary in `reference/`)
-- TG-GR6000N stock firmware (display init sequence)
-
-## Documentation
-
-See `docs/` for detailed analysis:
-- `LESSONS_LEARNED.md` - Critical pitfalls and fixes
-- `GPIO_PINOUT.md` - Pin mapping analysis
-- `CC2630_OEPL_ANALYSIS.md` - OEPL firmware reverse engineering
-- `COMPLETE_INIT_SEQUENCE.md` - UC8159 display init
+- TG-GR6000N stock firmware (display init sequence extracted via Ghidra)

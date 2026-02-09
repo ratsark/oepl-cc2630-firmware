@@ -1,0 +1,10 @@
+si cJTAG
+speed 1000
+device CC2630F128
+connect
+h
+SetPC 0x000000BC
+wreg MSP 0x20005000
+go
+sleep 100
+exit

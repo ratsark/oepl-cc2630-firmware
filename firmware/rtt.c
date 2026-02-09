@@ -1,11 +1,25 @@
 // -----------------------------------------------------------------------------
-//     Minimal SEGGER RTT implementation
+//     Minimal SEGGER RTT implementation + UART TX debug output
 // -----------------------------------------------------------------------------
 // Compatible with J-Link RTT protocol. J-Link scans target RAM for the
 // "SEGGER RTT" magic string to locate the control block.
+//
+// Also outputs all debug text to UART0 TX (DIO3) at 115200 baud for
+// debugging without J-Link. The FTDI adapter connected for cc2538-bsl
+// flashing receives this output.
 // -----------------------------------------------------------------------------
 
 #include "rtt.h"
+#include "uart.h"
+#include "ioc.h"
+#include "prcm.h"
+#include "hw_memmap.h"
+
+// UART TX pin — DIO3 is CC2630 ROM bootloader TX (connects to FTDI RX)
+#define UART_TX_PIN     3
+#define UART_RX_PIN     2
+#define UART_BAUD       115200
+#define SYSTEM_CLK_HZ   48000000
 
 // Ring buffer size — must be power of 2 for efficient masking
 #define RTT_BUFFER_SIZE 512
@@ -59,16 +73,45 @@ static RTT_CB _SEGGER_RTT __attribute__((used)) = {
     }}
 };
 
+static void uart_init(void)
+{
+    // SERIAL power domain should already be up (for SPI), but ensure it
+    PRCMPowerDomainOn(PRCM_DOMAIN_SERIAL);
+    while (PRCMPowerDomainStatus(PRCM_DOMAIN_SERIAL) != PRCM_DOMAIN_POWER_ON);
+
+    // Enable UART0 peripheral clock
+    PRCMPeripheralRunEnable(PRCM_PERIPH_UART0);
+    PRCMLoadSet();
+    while (!PRCMLoadGet());
+
+    // Configure UART pins (TX only needed, but set RX too for completeness)
+    IOCPinTypeUart(UART0_BASE, UART_RX_PIN, UART_TX_PIN, IOID_UNUSED, IOID_UNUSED);
+
+    // Configure UART0: 115200, 8N1
+    UARTConfigSetExpClk(UART0_BASE, SYSTEM_CLK_HZ, UART_BAUD,
+                        UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE);
+    UARTEnable(UART0_BASE);
+}
+
+static void uart_putc(char c)
+{
+    UARTCharPut(UART0_BASE, (uint8_t)c);
+}
+
 void rtt_init(void)
 {
     // Control block is statically initialized, nothing else needed.
     // This function exists as a clear initialization point and to
     // ensure the linker doesn't optimize away _SEGGER_RTT.
     (void)_SEGGER_RTT.acID[0];
+
+    // Initialize UART TX for debug output without J-Link
+    uart_init();
 }
 
 void rtt_putc(char c)
 {
+    // RTT output (for J-Link)
     unsigned wr = _SEGGER_RTT.aUp[0].WrOff;
     _aUpBuffer[wr] = c;
     wr++;
@@ -78,6 +121,9 @@ void rtt_putc(char c)
     // (WrOff == RdOff means empty; WrOff+1 == RdOff means full)
     if (wr != _SEGGER_RTT.aUp[0].RdOff)
         _SEGGER_RTT.aUp[0].WrOff = wr;
+
+    // UART output (for FTDI serial)
+    uart_putc(c);
 }
 
 void rtt_puts(const char *s)

@@ -348,9 +348,9 @@ int main(void)
     uc8159_init();
     rtt_puts("Display init OK\r\n");
 
-    // Note: Display connection may be degraded (BUSY pin always HIGH).
-    // DIO13 diagnostic showed BUSY reads HIGH regardless of pull config,
-    // suggesting FPC cable or hardware connection issue.
+    // Quick display test after FPC reseat
+    rtt_puts("Fill test (black)...\r\n");
+    uc8159_fill(0x00);
 
     // --- Initialize RF core ---
     rf_status_t rc = oepl_rf_init();
@@ -398,7 +398,8 @@ int main(void)
                 rtt_puts("No pending data\r\n");
             }
 
-            uint16_t wait_sec = info.nextCheckIn;
+            // AP sends nextCheckIn in minutes; convert to seconds
+            uint32_t wait_sec = (uint32_t)info.nextCheckIn * 60;
             if (wait_sec < 30) wait_sec = 30;
             if (wait_sec > 3600) wait_sec = 3600;
 
