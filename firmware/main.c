@@ -21,6 +21,12 @@
 #include "hw_memmap.h"
 #include "hw_prcm.h"
 
+// RTC + WFI sleep
+#include "aon_rtc.h"
+#include "aon_event.h"
+#include "cpu.h"
+#include "interrupt.h"
+
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
 // bw_buf: cached B/W block, red_buf: cached Red block
 static uint8_t bw_buf[BLOCK_XFER_BUFFER_SIZE];
@@ -42,9 +48,8 @@ static void epd_cmd(uint8_t c)
 }
 
 // Enter low-power sleep with timed wakeup after `seconds` seconds.
-// Shuts down RF core (~8mA savings) and busy-waits.
-// TODO: Investigate why AON_RTC CH0 compare event never fires on this chip,
-// then switch to WFI for lower CPU power during sleep.
+// Shuts down RF core (~8mA) and halts CPU via WFI until AON_RTC CH1 fires.
+// CH0 compare is broken on this chip (event flag never sets); CH1 works.
 static void enter_sleep(uint32_t seconds)
 {
     rtt_puts("SLEEP ");
@@ -55,9 +60,38 @@ static void enter_sleep(uint32_t seconds)
     // Shutdown RF core (biggest power consumer)
     oepl_rf_shutdown();
 
-    // Busy-wait with RF off
-    for (uint32_t s = 0; s < seconds; s++)
-        delay_cycles(8000000);
+    // --- RTC CH1 compare wakeup ---
+    AONRTCEnable();
+
+    // Read current RTC time in 16.16 format and set target
+    uint32_t now = AONRTCCurrentCompareValueGet();
+    uint32_t target = now + (seconds << 16);
+
+    AONRTCCompareValueSet(AON_RTC_CH1, target);
+    AONRTCModeCh1Set(AON_RTC_MODE_CH1_COMPARE);
+    AONRTCCombinedEventConfig(AON_RTC_CH1);
+    AONRTCEventClear(AON_RTC_CH1);
+    AONRTCChannelEnable(AON_RTC_CH1);
+
+    // Mask interrupts so ISR doesn't fire (WFI still wakes on pending IRQ)
+    CPUcpsid();
+    IntEnable(INT_AON_RTC_COMB);
+
+    // Sleep loop — WFI halts CPU, wakes on RTC or debug events
+    while (1) {
+        CPUwfi();
+        if (AONRTCEventGet(AON_RTC_CH1)) break;
+        // Fallback: check time directly (handles broken compare or spurious wake)
+        uint32_t cur = AONRTCCurrentCompareValueGet();
+        if ((int32_t)(cur - target) >= 0) break;
+    }
+
+    // Clean up
+    IntDisable(INT_AON_RTC_COMB);
+    IntPendClear(INT_AON_RTC_COMB);
+    AONRTCEventClear(AON_RTC_CH1);
+    AONRTCChannelDisable(AON_RTC_CH1);
+    CPUcpsie();
 
     rtt_puts("WAKE\r\n");
 }
