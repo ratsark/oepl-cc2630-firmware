@@ -13,6 +13,7 @@
 #include "prcm.h"
 #include "hw_memmap.h"
 #include "hw_types.h"  // for HWREG
+#include "aon_batmon.h"
 
 // Pin assignments — from STOCK FIRMWARE binary analysis (v29)
 // SPI pins: MOSI/MISO swapped vs OEPL HAL! Stock has mosiPin=9, misoPin=8
@@ -210,13 +211,20 @@ uint32_t oepl_hw_get_time_ms(void)
 
 bool oepl_hw_get_temperature(int8_t* temp_degc)
 {
-    *temp_degc = 25;
+    AONBatMonEnable();
+    int32_t temp = AONBatMonTemperatureGetDegC();
+    *temp_degc = (int8_t)temp;
     return true;
 }
 
 bool oepl_hw_get_voltage(uint16_t* voltage_mv)
 {
-    *voltage_mv = 3000;
+    AONBatMonEnable();
+    uint32_t raw = AONBatMonBatteryVoltageGet();
+    // Raw format: bits [10:8] = integer volts, bits [7:0] = fraction (0-255)
+    uint32_t int_v = (raw >> 8) & 0x7;
+    uint32_t frac = raw & 0xFF;
+    *voltage_mv = (uint16_t)(int_v * 1000 + (frac * 1000) / 256);
     return true;
 }
 

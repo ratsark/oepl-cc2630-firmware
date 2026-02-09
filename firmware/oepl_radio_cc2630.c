@@ -12,6 +12,7 @@
 
 #include "oepl_radio_cc2630.h"
 #include "oepl_rf_cc2630.h"
+#include "oepl_hw_abstraction_cc2630.h"
 #include "rf_mailbox.h"
 #include "rtt.h"
 #include <string.h>
@@ -167,8 +168,12 @@ bool oepl_radio_checkin(struct AvailDataInfo *out_info)
     memset(req, 0, sizeof(struct AvailDataReq));
     req->lastPacketLQI = radio_st.last_lqi;
     req->lastPacketRSSI = radio_st.last_rssi;
-    req->temperature = 25;
-    req->batteryMv = 3000;
+    int8_t temp_c;
+    uint16_t bat_mv;
+    oepl_hw_get_temperature(&temp_c);
+    oepl_hw_get_voltage(&bat_mv);
+    req->temperature = temp_c;
+    req->batteryMv = bat_mv;
     req->hwType = HW_TYPE;
     req->wakeupReason = WAKEUP_REASON_FIRSTBOOT;
     req->capabilities = 0;
