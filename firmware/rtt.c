@@ -95,6 +95,9 @@ static void uart_init(void)
 
 static void uart_putc(char c)
 {
+    // Note: UART registers are correctly configured (verified via JLink)
+    // but output doesn't reach FTDI — likely hardware path issue.
+    // Keeping code active in case a different FTDI wiring resolves it.
     UARTCharPut(UART0_BASE, (uint8_t)c);
 }
 
