@@ -32,6 +32,15 @@ static void delay_cycles(volatile uint32_t n)
     while (n--) __asm volatile ("nop");
 }
 
+// Send a display command byte (DC=LOW, single CS frame)
+static void epd_cmd(uint8_t c)
+{
+    oepl_hw_gpio_set(15, false);  // DC = command
+    oepl_hw_spi_cs_assert();
+    oepl_hw_spi_send_raw(&c, 1);
+    oepl_hw_spi_cs_deassert();
+}
+
 // Enter low-power sleep with timed wakeup after `seconds` seconds.
 // Shuts down RF core (~8mA savings) and busy-waits.
 // TODO: Investigate why AON_RTC CH0 compare event never fires on this chip,
@@ -220,6 +229,11 @@ static bool download_and_display(struct AvailDataInfo *info)
     bw_cache_id = -1;
     red_cache_id = -1;
 
+    // Full re-init display before each update (UC8159 requires fresh init before each DRF)
+    rtt_puts("EPD wake...");
+    uc8159_wake();
+    rtt_puts("OK\r\n");
+
     // Open display for pixel data: DTM1 (cmd 0x10) in one CS frame
     oepl_hw_gpio_set(15, false);  // DC = command
     oepl_hw_spi_cs_assert();
@@ -333,6 +347,10 @@ int main(void)
     // --- Initialize display (no fill, saves 26s) ---
     uc8159_init();
     rtt_puts("Display init OK\r\n");
+
+    // Note: Display connection may be degraded (BUSY pin always HIGH).
+    // DIO13 diagnostic showed BUSY reads HIGH regardless of pull config,
+    // suggesting FPC cable or hardware connection issue.
 
     // --- Initialize RF core ---
     rf_status_t rc = oepl_rf_init();
