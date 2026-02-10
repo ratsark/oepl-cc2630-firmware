@@ -21,11 +21,8 @@
 #include "hw_memmap.h"
 #include "hw_prcm.h"
 
-// RTC + WFI sleep
+// RTC-timed sleep
 #include "aon_rtc.h"
-#include "aon_event.h"
-#include "cpu.h"
-#include "interrupt.h"
 
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
 // bw_buf: cached B/W block, red_buf: cached Red block
@@ -47,9 +44,11 @@ static void epd_cmd(uint8_t c)
     oepl_hw_spi_cs_deassert();
 }
 
-// Enter low-power sleep with timed wakeup after `seconds` seconds.
-// Shuts down RF core (~8mA) and halts CPU via WFI until AON_RTC CH1 fires.
-// CH0 compare is broken on this chip (event flag never sets); CH1 works.
+// Enter sleep with timed wakeup after `seconds` seconds.
+// Shuts down RF core (~8mA savings) and polls AON_RTC for accurate timing.
+// WFI doesn't reliably wake on CC2630 (PRCM intercepts, NVIC pending IRQ
+// doesn't wake CPU without active JLink debug polling). Using RTC-timed
+// polling instead: accurate timing, RF off, CPU polls at ~100ms intervals.
 static void enter_sleep(uint32_t seconds)
 {
     rtt_puts("SLEEP ");
@@ -60,38 +59,15 @@ static void enter_sleep(uint32_t seconds)
     // Shutdown RF core (biggest power consumer)
     oepl_rf_shutdown();
 
-    // --- RTC CH1 compare wakeup ---
+    // Use AON_RTC for accurate sleep timing (16.16 format)
     AONRTCEnable();
-
-    // Read current RTC time in 16.16 format and set target
     uint32_t now = AONRTCCurrentCompareValueGet();
     uint32_t target = now + (seconds << 16);
 
-    AONRTCCompareValueSet(AON_RTC_CH1, target);
-    AONRTCModeCh1Set(AON_RTC_MODE_CH1_COMPARE);
-    AONRTCCombinedEventConfig(AON_RTC_CH1);
-    AONRTCEventClear(AON_RTC_CH1);
-    AONRTCChannelEnable(AON_RTC_CH1);
-
-    // Mask interrupts so ISR doesn't fire (WFI still wakes on pending IRQ)
-    CPUcpsid();
-    IntEnable(INT_AON_RTC_COMB);
-
-    // Sleep loop — WFI halts CPU, wakes on RTC or debug events
-    while (1) {
-        CPUwfi();
-        if (AONRTCEventGet(AON_RTC_CH1)) break;
-        // Fallback: check time directly (handles broken compare or spurious wake)
-        uint32_t cur = AONRTCCurrentCompareValueGet();
-        if ((int32_t)(cur - target) >= 0) break;
+    // Poll RTC until target time reached (~100ms between checks)
+    while ((int32_t)(AONRTCCurrentCompareValueGet() - target) < 0) {
+        delay_cycles(480000);  // ~10ms at 48MHz
     }
-
-    // Clean up
-    IntDisable(INT_AON_RTC_COMB);
-    IntPendClear(INT_AON_RTC_COMB);
-    AONRTCEventClear(AON_RTC_CH1);
-    AONRTCChannelDisable(AON_RTC_CH1);
-    CPUcpsie();
 
     rtt_puts("WAKE\r\n");
 }
@@ -172,30 +148,45 @@ static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
     return false;
 }
 
-// Ensure a block is in the B/W cache
+// Ensure a block is in the B/W cache.
+// On download failure, fills buffer with white (0x00) and caches the block ID
+// to avoid re-attempting the same failed block on every row.
 static bool ensure_bw_block(uint8_t block_id, struct AvailDataInfo *info)
 {
     if (bw_cache_id == block_id) return true;
     uint16_t sz;
-    if (!download_block(block_id, info, bw_buf, &sz)) return false;
+    if (!download_block(block_id, info, bw_buf, &sz)) {
+        memset(bw_buf, 0x00, BLOCK_XFER_BUFFER_SIZE);
+        bw_cache_id = block_id;
+        return false;
+    }
     bw_cache_id = block_id;
     return true;
 }
 
-// Ensure a block is in the Red cache
+// Ensure a block is in the Red cache.
+// On download failure, fills buffer with 0x00 (no red) and caches.
 static bool ensure_red_block(uint8_t block_id, struct AvailDataInfo *info)
 {
     if (red_cache_id == block_id) return true;
     uint16_t sz;
-    if (!download_block(block_id, info, red_buf, &sz)) return false;
+    if (!download_block(block_id, info, red_buf, &sz)) {
+        memset(red_buf, 0x00, BLOCK_XFER_BUFFER_SIZE);
+        red_cache_id = block_id;
+        return false;
+    }
     red_cache_id = block_id;
     return true;
 }
 
+// Count of blocks that failed download (reset before each image)
+static uint8_t dl_failed_blocks;
+
 // Get bytes from the image at a given offset, using cached blocks.
 // Each block has a 4-byte BlockData header (size + checksum) followed by
 // BLOCK_DATA_SIZE bytes of actual image data. We skip the header.
-static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
+// On block download failure, uses white data (ensure_*_block fills buffer).
+static void get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
                              struct AvailDataInfo *info, bool is_red_plane)
 {
     while (len > 0) {
@@ -206,10 +197,10 @@ static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
 
         uint8_t *cache;
         if (is_red_plane) {
-            if (!ensure_red_block(block_id, info)) return false;
+            if (!ensure_red_block(block_id, info)) dl_failed_blocks++;
             cache = red_buf;
         } else {
-            if (!ensure_bw_block(block_id, info)) return false;
+            if (!ensure_bw_block(block_id, info)) dl_failed_blocks++;
             cache = bw_buf;
         }
 
@@ -219,7 +210,6 @@ static bool get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
         offset += avail;
         len -= avail;
     }
-    return true;
 }
 
 // Convert 1 byte B/W + 1 byte Red (8 pixels) to 4 bytes of 4bpp UC8159
@@ -242,7 +232,9 @@ static void bwr_to_4bpp(uint8_t bw, uint8_t red, uint8_t out[4])
     }
 }
 
-// Download image and stream to display
+// Download image and stream to display.
+// On block download failure, fills with white and continues instead of aborting.
+// Returns true if image was displayed (even partially).
 static bool download_and_display(struct AvailDataInfo *info)
 {
     uint32_t data_size = info->dataSize;
@@ -252,6 +244,7 @@ static bool download_and_display(struct AvailDataInfo *info)
     uint16_t row_bytes = width / 8;           // 75 bytes per 1bpp row
     uint32_t plane_size = (uint32_t)row_bytes * height;  // 33,600 bytes
     bool has_red = (data_type == 0x21) && (data_size >= plane_size * 2);
+    dl_failed_blocks = 0;
 
     rtt_puts("DL+DISP: sz=");
     rtt_put_hex32(data_size);
@@ -282,21 +275,13 @@ static bool download_and_display(struct AvailDataInfo *info)
     for (uint16_t y = 0; y < height; y++) {
         uint32_t bw_offset = (uint32_t)y * row_bytes;
 
-        // Get B/W line
-        if (!get_image_bytes(bw_offset, bw_line, row_bytes, info, false)) {
-            rtt_puts("BW fail\r\n");
-            oepl_hw_spi_cs_deassert();
-            return false;
-        }
+        // Get B/W line (failed blocks auto-fill white via ensure_bw_block)
+        get_image_bytes(bw_offset, bw_line, row_bytes, info, false);
 
         // Get Red line (if 2bpp)
         if (has_red) {
             uint32_t red_offset = plane_size + (uint32_t)y * row_bytes;
-            if (!get_image_bytes(red_offset, red_line, row_bytes, info, true)) {
-                rtt_puts("RD fail\r\n");
-                oepl_hw_spi_cs_deassert();
-                return false;
-            }
+            get_image_bytes(red_offset, red_line, row_bytes, info, true);
         } else {
             memset(red_line, 0, row_bytes);
         }
@@ -316,7 +301,14 @@ static bool download_and_display(struct AvailDataInfo *info)
     }
 
     oepl_hw_spi_cs_deassert();
-    rtt_puts("\r\nDATA OK\r\n");
+
+    if (dl_failed_blocks > 0) {
+        rtt_puts("\r\nDATA PARTIAL (");
+        rtt_put_hex8(dl_failed_blocks);
+        rtt_puts(" failed)\r\n");
+    } else {
+        rtt_puts("\r\nDATA OK\r\n");
+    }
 
     // DATA_STOP (0x11)
     oepl_hw_gpio_set(15, false);
@@ -339,9 +331,14 @@ static bool download_and_display(struct AvailDataInfo *info)
     }
     rtt_puts("done\r\n");
 
-    // Send XferComplete
-    oepl_radio_send_xfer_complete();
-    rtt_puts("XferComplete\r\n");
+    // Only send XferComplete if download was fully successful.
+    // On partial failure, AP keeps data pending for retry next checkin.
+    if (dl_failed_blocks == 0) {
+        oepl_radio_send_xfer_complete();
+        rtt_puts("XferComplete\r\n");
+    } else {
+        rtt_puts("Skipping XferComplete (retry next checkin)\r\n");
+    }
 
     return true;
 }
