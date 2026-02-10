@@ -36,6 +36,7 @@ SOURCES = \
 	$(FIRMWARE_DIR)/oepl_radio_cc2630.c \
 	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
 	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
+	$(FIRMWARE_DIR)/splash.c \
 	$(FIRMWARE_DIR)/main.c
 
 # Include paths

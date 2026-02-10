@@ -147,4 +147,7 @@ bool oepl_radio_send_xfer_complete(void);
 // Get radio state
 radio_state_t *oepl_radio_get_state(void);
 
+// Set wakeup reason for next checkin
+void oepl_radio_set_wakeup_reason(uint8_t reason);
+
 #endif // OEPL_RADIO_CC2630_H

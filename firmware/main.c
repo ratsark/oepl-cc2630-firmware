@@ -12,6 +12,7 @@
 #include "oepl_radio_cc2630.h"
 #include "oepl_hw_abstraction_cc2630.h"
 #include "drivers/oepl_display_driver_uc8159_600x448.h"
+#include "splash.h"
 
 // TI driverlib
 #include "sys_ctrl.h"
@@ -33,15 +34,6 @@ static int8_t bw_cache_id, red_cache_id;  // which block ID is cached (-1 = none
 static void delay_cycles(volatile uint32_t n)
 {
     while (n--) __asm volatile ("nop");
-}
-
-// Send a display command byte (DC=LOW, single CS frame)
-static void epd_cmd(uint8_t c)
-{
-    oepl_hw_gpio_set(15, false);  // DC = command
-    oepl_hw_spi_cs_assert();
-    oepl_hw_spi_send_raw(&c, 1);
-    oepl_hw_spi_cs_deassert();
 }
 
 // Enter sleep with timed wakeup after `seconds` seconds.
@@ -375,13 +367,9 @@ int main(void)
     print_mac_msb(mac);
     rtt_puts("\r\n");
 
-    // --- Initialize display (no fill, saves 26s) ---
+    // --- Initialize display ---
     uc8159_init();
     rtt_puts("Display init OK\r\n");
-
-    // Quick display test after FPC reseat
-    rtt_puts("Fill test (black)...\r\n");
-    uc8159_fill(0x00);
 
     // --- Initialize RF core ---
     rf_status_t rc = oepl_rf_init();
@@ -395,6 +383,17 @@ int main(void)
 
     // --- Initialize OEPL radio protocol layer ---
     oepl_radio_init();
+
+    // --- Splash screen: scan for AP and show boot info ---
+    {
+        int8_t splash_ch = oepl_radio_scan_channels();
+        int8_t temp_c;
+        uint16_t bat_mv;
+        oepl_hw_get_temperature(&temp_c);
+        oepl_hw_get_voltage(&bat_mv);
+        radio_state_t *rst = oepl_radio_get_state();
+        splash_display(mac, bat_mv, temp_c, splash_ch >= 0, rst->current_ieee_ch);
+    }
 
     // --- Main loop: periodic checkin + download ---
     // First 2 checkins use busy-wait (keeps JLink/RTT alive for debugging).
@@ -422,11 +421,13 @@ int main(void)
             if (info.dataType != DATATYPE_NOUPDATE) {
                 if (download_and_display(&info)) {
                     rtt_puts("*** IMAGE DISPLAYED ***\r\n");
+                    oepl_radio_set_wakeup_reason(WAKEUP_REASON_TIMED);
                 } else {
                     rtt_puts("Display failed\r\n");
                 }
             } else {
                 rtt_puts("No pending data\r\n");
+                oepl_radio_set_wakeup_reason(WAKEUP_REASON_TIMED);
             }
 
             // AP sends nextCheckIn in minutes; convert to seconds

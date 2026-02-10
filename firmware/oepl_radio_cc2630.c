@@ -20,6 +20,7 @@
 // --- Static State ---
 static radio_state_t radio_st;
 static uint8_t tx_frame[64];
+static uint8_t g_wakeup_reason = WAKEUP_REASON_FIRSTBOOT;
 
 // --- Helpers ---
 
@@ -175,7 +176,7 @@ bool oepl_radio_checkin(struct AvailDataInfo *out_info)
     req->temperature = temp_c;
     req->batteryMv = bat_mv;
     req->hwType = HW_TYPE;
-    req->wakeupReason = WAKEUP_REASON_FIRSTBOOT;
+    req->wakeupReason = g_wakeup_reason;
     req->capabilities = 0;
     req->tagSoftwareVersion = 0x0001;
     req->currentChannel = radio_st.current_channel;
@@ -404,4 +405,9 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
 radio_state_t *oepl_radio_get_state(void)
 {
     return &radio_st;
+}
+
+void oepl_radio_set_wakeup_reason(uint8_t reason)
+{
+    g_wakeup_reason = reason;
 }
