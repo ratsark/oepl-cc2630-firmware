@@ -40,6 +40,7 @@
 
 // Data types
 #define DATATYPE_NOUPDATE       0x00
+#define DATATYPE_FW_UPDATE      0x03
 
 // --- Protocol Structs (packed, little-endian on wire) ---
 
@@ -149,5 +150,12 @@ radio_state_t *oepl_radio_get_state(void);
 
 // Set wakeup reason for next checkin
 void oepl_radio_set_wakeup_reason(uint8_t reason);
+
+// Download a single block into buf (with retries). Defined in main.c.
+bool download_block(uint8_t block_id, struct AvailDataInfo *info,
+                    uint8_t *buf, uint16_t *out_size);
+
+// Block transfer buffer (4100 bytes in main.c), shared with OTA
+extern uint8_t bw_buf[];
 
 #endif // OEPL_RADIO_CC2630_H

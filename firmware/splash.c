@@ -249,7 +249,7 @@ void splash_display(const uint8_t *mac, uint16_t battery_mv, int8_t temp_c,
         [TXT_MAC]   = {166,  3, COL_BLACK, mac_str,              0, 0},
         [TXT_BAT]   = {234,  3, COL_BLACK, bat_temp_str,         0, 0},
         [TXT_AP]    = {302,  3, ap_found ? COL_BLACK : COL_RED, ap_str, 0, 0},
-        [TXT_FW]    = {404,  2, COL_BLACK, "FW v0.1",            0, 0},
+        [TXT_FW]    = {404,  2, COL_BLACK, "FW v0.2 (OTA)",      0, 0},
     };
     for (uint8_t i = 0; i < NUM_TEXTS; i++)
         precompute_text(&texts[i]);

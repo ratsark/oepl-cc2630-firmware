@@ -13,6 +13,7 @@
 #include "oepl_hw_abstraction_cc2630.h"
 #include "drivers/oepl_display_driver_uc8159_600x448.h"
 #include "splash.h"
+#include "oepl_ota_cc2630.h"
 
 // TI driverlib
 #include "sys_ctrl.h"
@@ -26,8 +27,8 @@
 #include "aon_rtc.h"
 
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
-// bw_buf: cached B/W block, red_buf: cached Red block
-static uint8_t bw_buf[BLOCK_XFER_BUFFER_SIZE];
+// bw_buf: cached B/W block (also used by OTA), red_buf: cached Red block
+uint8_t bw_buf[BLOCK_XFER_BUFFER_SIZE];
 static uint8_t red_buf[BLOCK_XFER_BUFFER_SIZE];
 static int8_t bw_cache_id, red_cache_id;  // which block ID is cached (-1 = none)
 
@@ -107,8 +108,8 @@ static bool do_scan_and_checkin(struct AvailDataInfo *info)
 
 // Download a specific block into a buffer, with retries
 // Accumulates parts across attempts — missing parts requested on retry
-static bool download_block(uint8_t block_id, struct AvailDataInfo *info,
-                            uint8_t *buf, uint16_t *out_size)
+bool download_block(uint8_t block_id, struct AvailDataInfo *info,
+                    uint8_t *buf, uint16_t *out_size)
 {
     rtt_puts("B");
     rtt_put_hex8(block_id);
@@ -418,7 +419,12 @@ int main(void)
             rtt_put_hex8(info.nextCheckIn & 0xFF);
             rtt_puts("\r\n");
 
-            if (info.dataType != DATATYPE_NOUPDATE) {
+            if (info.dataType == DATATYPE_FW_UPDATE) {
+                rtt_puts("*** FW UPDATE ***\r\n");
+                oepl_ota_download_and_apply(&info);
+                // Returns only on failure — will retry next checkin
+                rtt_puts("FW update failed, retry later\r\n");
+            } else if (info.dataType != DATATYPE_NOUPDATE) {
                 if (download_and_display(&info)) {
                     rtt_puts("*** IMAGE DISPLAYED ***\r\n");
                     oepl_radio_set_wakeup_reason(WAKEUP_REASON_TIMED);

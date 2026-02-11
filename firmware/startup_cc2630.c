@@ -24,6 +24,9 @@ extern uint32_t _estack;
 extern uint32_t _data;
 extern uint32_t _edata;
 extern uint32_t _ldata;
+extern uint32_t _ramfunc;
+extern uint32_t _eramfunc;
+extern uint32_t _lramfunc;
 extern uint32_t _bss;
 extern uint32_t _ebss;
 
@@ -135,6 +138,13 @@ void Reset_Handler(void)
     uint32_t *src = &_ldata;
     uint32_t *dst = &_data;
     while (dst < &_edata) {
+        *dst++ = *src++;
+    }
+
+    // Copy .ramfunc from flash to RAM
+    src = &_lramfunc;
+    dst = &_ramfunc;
+    while (dst < &_eramfunc) {
         *dst++ = *src++;
     }
 

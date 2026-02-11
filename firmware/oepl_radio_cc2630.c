@@ -178,7 +178,7 @@ bool oepl_radio_checkin(struct AvailDataInfo *out_info)
     req->hwType = HW_TYPE;
     req->wakeupReason = g_wakeup_reason;
     req->capabilities = 0;
-    req->tagSoftwareVersion = 0x0001;
+    req->tagSoftwareVersion = 0x0002;
     req->currentChannel = radio_st.current_channel;
     req->customMode = 0;
     add_crc(req, sizeof(struct AvailDataReq));

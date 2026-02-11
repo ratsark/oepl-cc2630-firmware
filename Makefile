@@ -37,6 +37,7 @@ SOURCES = \
 	$(FIRMWARE_DIR)/oepl_hw_abstraction_cc2630.c \
 	$(DRIVERS_DIR)/oepl_display_driver_uc8159_600x448.c \
 	$(FIRMWARE_DIR)/splash.c \
+	$(FIRMWARE_DIR)/oepl_ota_cc2630.c \
 	$(FIRMWARE_DIR)/main.c
 
 # Include paths
@@ -140,6 +141,13 @@ $(BIN_DIR)/$(PROJECT).bin: $(BUILD_DIR)/$(PROJECT).elf | $(BIN_DIR)
 	@$(OBJCOPY) -O binary $< $@
 	@echo "Firmware binary created: $@"
 
+# Create OTA binary (no CCFG section — just firmware code + data)
+ota: $(BUILD_DIR)/$(PROJECT).elf | $(BIN_DIR)
+	@echo "OBJCOPY OTA binary (no CCFG)"
+	@$(OBJCOPY) -O binary --remove-section=.ccfg $< $(BIN_DIR)/$(PROJECT)_ota.bin
+	@ls -l $(BIN_DIR)/$(PROJECT)_ota.bin
+	@echo "OTA binary created: $(BIN_DIR)/$(PROJECT)_ota.bin"
+
 # Show size
 size: $(BUILD_DIR)/$(PROJECT).elf
 	@echo ""
@@ -194,6 +202,7 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  all          - Build firmware (default)"
+	@echo "  ota          - Build OTA update binary (no CCFG)"
 	@echo "  clean        - Remove build artifacts"
 	@echo "  program      - Program via UART bootloader (D/L pin must be low)"
 	@echo "  jtag-flash   - Program via JTAG (J-Link + OpenOCD)"
@@ -210,4 +219,4 @@ help:
 	@echo "  1. make debug-server   (in one terminal)"
 	@echo "  2. make debug          (in another terminal)"
 
-.PHONY: all clean program jtag-flash debug-server debug size help
+.PHONY: all ota clean program jtag-flash debug-server debug size help

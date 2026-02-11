@@ -47,6 +47,17 @@ SECTIONS
     /* Load address of .data in flash */
     _ldata = LOADADDR(.data);
 
+    /* RAM-resident functions (copied from flash to RAM at startup) */
+    .ramfunc :
+    {
+        _ramfunc = .;
+        *(.ramfunc*)
+        _eramfunc = .;
+    } > SRAM AT > FLASH
+
+    /* Load address of .ramfunc in flash */
+    _lramfunc = LOADADDR(.ramfunc);
+
     /* Uninitialized data (zeroed at startup) */
     .bss :
     {
