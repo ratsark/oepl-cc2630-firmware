@@ -420,10 +420,15 @@ int main(void)
             rtt_puts("\r\n");
 
             if (info.dataType == DATATYPE_FW_UPDATE) {
-                rtt_puts("*** FW UPDATE ***\r\n");
-                oepl_ota_download_and_apply(&info);
-                // Returns only on failure — will retry next checkin
-                rtt_puts("FW update failed, retry later\r\n");
+                if (oepl_ota_already_applied(info.dataVer)) {
+                    rtt_puts("OTA: already applied, sending XferComplete\r\n");
+                    oepl_radio_send_xfer_complete();
+                } else {
+                    rtt_puts("*** FW UPDATE ***\r\n");
+                    oepl_ota_download_and_apply(&info);
+                    // Returns only on failure — will retry next checkin
+                    rtt_puts("FW update failed, retry later\r\n");
+                }
             } else if (info.dataType != DATATYPE_NOUPDATE) {
                 if (download_and_display(&info)) {
                     rtt_puts("*** IMAGE DISPLAYED ***\r\n");

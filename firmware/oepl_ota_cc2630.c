@@ -6,7 +6,8 @@
 //
 //  Flash layout (CC2630F128 = 128KB):
 //    0x00000 - 0x0FFFF:  Active firmware (64KB max, sectors 0-15)
-//    0x10000 - 0x1EFFF:  OTA staging area (60KB, sectors 16-30)
+//    0x10000 - 0x1DFFF:  OTA staging area (56KB, sectors 16-29)
+//    0x1E000 - 0x1EFFF:  OTA dataVer tracking (sector 30)
 //    0x1F000 - 0x1FFFF:  CCFG sector (never touched)
 // -----------------------------------------------------------------------------
 
@@ -59,6 +60,35 @@ static bool staging_verify(uint32_t addr, const uint8_t *data, uint32_t len)
         if (flash[i] != data[i]) return false;
     }
     return true;
+}
+
+// --- DataVer tracking (prevents OTA loops) ---
+// Stored in sector 30 (0x1E000) which is outside the staging area.
+
+struct __attribute__((packed)) OtaDataVerRecord {
+    uint32_t magic;     // OTA_DATAVER_MAGIC
+    uint64_t dataVer;
+};
+
+bool oepl_ota_already_applied(uint64_t dataVer)
+{
+    const struct OtaDataVerRecord *rec =
+        (const struct OtaDataVerRecord *)OTA_DATAVER_ADDR;
+    return (rec->magic == OTA_DATAVER_MAGIC && rec->dataVer == dataVer);
+}
+
+static bool save_dataver(uint64_t dataVer)
+{
+    // Erase sector 30
+    uint32_t rc = staging_erase_sector(OTA_DATAVER_ADDR);
+    if (rc != FAPI_STATUS_SUCCESS) return false;
+
+    // Write magic + dataVer
+    struct OtaDataVerRecord rec;
+    rec.magic = OTA_DATAVER_MAGIC;
+    rec.dataVer = dataVer;
+    rc = staging_program((uint8_t *)&rec, OTA_DATAVER_ADDR, sizeof(rec));
+    return (rc == FAPI_STATUS_SUCCESS);
 }
 
 // --- RAM-resident apply function ---
@@ -266,6 +296,11 @@ void oepl_ota_download_and_apply(struct AvailDataInfo *info)
     }
 
     rtt_puts("\r\nOTA: all blocks OK, vectors valid\r\n");
+
+    // Save dataVer so we can skip re-download after reboot
+    if (save_dataver(info->dataVer)) {
+        rtt_puts("OTA: dataVer saved\r\n");
+    }
 
     // Send XferComplete to AP before applying
     oepl_radio_send_xfer_complete();
