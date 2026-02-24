@@ -165,6 +165,19 @@ extern void rtt_puts(const char *s);
 extern void rtt_put_hex8(uint8_t v);
 extern void rtt_put_hex32(uint32_t v);
 
+// System reset via ROM Hard-API (HAPI table at 0x10000048, entry 6)
+static void fault_reset(void)
+{
+    // Brief delay so RTT/UART output flushes
+    for (volatile uint32_t i = 0; i < 5000000; i++) __asm volatile("nop");
+
+    typedef void (*reset_fn_t)(void);
+    uint32_t *hapi_table = (uint32_t *)0x10000048;
+    reset_fn_t rom_reset = (reset_fn_t)hapi_table[6];
+    rom_reset();
+    while (1) __asm volatile("nop");
+}
+
 void HardFault_Handler(void)
 {
     // Read stacked registers from MSP
@@ -178,11 +191,11 @@ void HardFault_Handler(void)
     rtt_puts("CFSR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED28); rtt_puts("\r\n");
     rtt_puts("BFAR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED38); rtt_puts("\r\n");
 
-    while (1) { __asm volatile ("nop"); }
+    fault_reset();
 }
 
 void Default_Handler(void)
 {
     rtt_puts("\r\n!!! DEFAULT IRQ !!!\r\n");
-    while (1) { __asm volatile ("nop"); }
+    fault_reset();
 }

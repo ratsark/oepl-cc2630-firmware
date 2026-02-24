@@ -39,9 +39,14 @@ static void delay_cycles(volatile uint32_t n)
 
 // Enter sleep with timed wakeup after `seconds` seconds.
 // Shuts down RF core (~8mA savings) and polls AON_RTC for accurate timing.
-// WFI doesn't reliably wake on CC2630 (PRCM intercepts, NVIC pending IRQ
-// doesn't wake CPU without active JLink debug polling). Using RTC-timed
-// polling instead: accurate timing, RF off, CPU polls at ~100ms intervals.
+//
+// WFI (with and without SLEEPDEEP, with NVIC IntEnable + AON event routing)
+// does NOT wake on CC2630 — PRCM power controller intercepts idle state.
+// PRCMDeepSleep triggers full standby that routes wakeup through ROM.
+// Plain WFI never wakes even with interrupt pending + enabled in NVIC.
+// This appears to be a fundamental CC2630 silicon behavior.
+//
+// Polling with RF off: ~5mA (vs ~13mA active with RF).
 static void enter_sleep(uint32_t seconds)
 {
     rtt_puts("SLEEP ");
@@ -57,9 +62,9 @@ static void enter_sleep(uint32_t seconds)
     uint32_t now = AONRTCCurrentCompareValueGet();
     uint32_t target = now + (seconds << 16);
 
-    // Poll RTC until target time reached (~100ms between checks)
+    // Poll RTC until target time reached (~10ms between checks)
     while ((int32_t)(AONRTCCurrentCompareValueGet() - target) < 0) {
-        delay_cycles(480000);  // ~10ms at 48MHz
+        delay_cycles(480000);
     }
 
     rtt_puts("WAKE\r\n");
@@ -467,12 +472,34 @@ int main(void)
             }
         }
 
-        // After WFI sleep, RF core was shut down — re-init before next checkin
+        // After sleep, RF core was shut down — re-init before next checkin
         if (use_sleep) {
-            rc = oepl_rf_init();
-            if (rc != RF_OK) {
-                rtt_puts("RF re-init FAILED\r\n");
-                goto idle;
+            bool rf_ok = false;
+            for (uint8_t retry = 0; retry < 5; retry++) {
+                if (retry > 0) {
+                    rtt_puts("RF re-init retry ");
+                    rtt_put_hex8(retry);
+                    rtt_puts("\r\n");
+                    delay_cycles(48000000);  // ~1s delay between retries
+                }
+                rc = oepl_rf_init();
+                if (rc == RF_OK) {
+                    rf_ok = true;
+                    break;
+                }
+            }
+            if (!rf_ok) {
+                // All retries failed — system reset instead of dying
+                rtt_puts("RF re-init FAILED x5, RESET\r\n");
+                // Brief delay so RTT/UART output flushes
+                delay_cycles(4800000);
+                // Reset via ROM Hard-API
+                typedef void (*reset_fn_t)(void);
+                uint32_t *hapi_table = (uint32_t *)0x10000048;
+                reset_fn_t rom_reset = (reset_fn_t)hapi_table[6];
+                rom_reset();
+                // Should not reach here
+                while (1) __asm volatile("nop");
             }
             oepl_radio_init();
         }
@@ -484,8 +511,17 @@ int main(void)
     }
 
 idle:
-    rtt_puts("Entering idle\r\n");
-    while (1) delay_cycles(8000000);
+    // Fatal error — wait 10 seconds then reset to try again
+    rtt_puts("Fatal error, reset in 10s\r\n");
+    for (uint8_t i = 0; i < 10; i++)
+        delay_cycles(48000000);  // ~1s each
+    {
+        typedef void (*reset_fn_t)(void);
+        uint32_t *hapi_table = (uint32_t *)0x10000048;
+        reset_fn_t rom_reset = (reset_fn_t)hapi_table[6];
+        rom_reset();
+    }
+    while (1) __asm volatile("nop");
 
     return 0;
 }
