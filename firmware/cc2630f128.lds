@@ -67,6 +67,14 @@ SECTIONS
         _ebss = .;
     } > SRAM
 
+    /* No-init data (NOT zeroed or copied — survives standby with SRAM retention) */
+    .noinit (NOLOAD) :
+    {
+        _noinit = .;
+        *(.noinit*)
+        _enoinit = .;
+    } > SRAM
+
     /* Stack */
     .stack :
     {

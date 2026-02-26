@@ -26,27 +26,47 @@
 // RTC-timed sleep
 #include "aon_rtc.h"
 
+// Deep sleep: AON wakeup controller, event routing, VIMS cache, interrupts
+#include "aon_wuc.h"
+#include "aon_event.h"
+#include "vims.h"
+#include "interrupt.h"
+#include "hw_ints.h"
+#include "hw_aon_rtc.h"
+#include "aon_ioc.h"
+
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
 // bw_buf: cached B/W block (also used by OTA), red_buf: cached Red block
 uint8_t bw_buf[BLOCK_XFER_BUFFER_SIZE];
 static uint8_t red_buf[BLOCK_XFER_BUFFER_SIZE];
 static int8_t bw_cache_id, red_cache_id;  // which block ID is cached (-1 = none)
 
+// Warm boot detection: .noinit survives WFI return path (debug tag with JLink).
+// Hardware reset source covers full standby wakeup (battery tag, no debugger).
+#define WARMBOOT_MAGIC_A 0xDEE5BEEF
+#define WARMBOOT_MAGIC_B 0x2116CAFE
+__attribute__((section(".noinit"))) static volatile uint32_t warmboot_magic_a;
+__attribute__((section(".noinit"))) static volatile uint32_t warmboot_magic_b;
+
 static void delay_cycles(volatile uint32_t n)
 {
     while (n--) __asm volatile ("nop");
 }
 
-// Enter sleep with timed wakeup after `seconds` seconds.
-// Shuts down RF core (~8mA savings) and polls AON_RTC for accurate timing.
+// AON RTC interrupt handler — wakes CPU from deep sleep (WFI).
+// Overrides the weak alias to Default_Handler in startup_cc2630.c.
+// Without this ISR and IntEnable(INT_AON_RTC_COMB), WFI hangs forever
+// because the Cortex-M3 requires an NVIC-enabled interrupt to wake.
+void AON_RTC_Handler(void)
+{
+    AONRTCEventClear(AON_RTC_CH0);
+}
+
+// Enter deep sleep with RTC-timed wakeup.
 //
-// WFI (with and without SLEEPDEEP, with NVIC IntEnable + AON event routing)
-// does NOT wake on CC2630 — PRCM power controller intercepts idle state.
-// PRCMDeepSleep triggers full standby that routes wakeup through ROM.
-// Plain WFI never wakes even with interrupt pending + enabled in NVIC.
-// This appears to be a fundamental CC2630 silicon behavior.
-//
-// Polling with RF off: ~5mA (vs ~13mA active with RF).
+// WFI sleep with power domain management.
+// Shuts down RF core and PERIPH/SERIAL domains for lower power during sleep.
+// Uses plain WFI (no SLEEPDEEP) — CPU is clock-gated, wakes on RTC interrupt.
 static void enter_sleep(uint32_t seconds)
 {
     rtt_puts("SLEEP ");
@@ -54,18 +74,67 @@ static void enter_sleep(uint32_t seconds)
     rtt_put_hex8(seconds & 0xFF);
     rtt_puts("s\r\n");
 
-    // Shutdown RF core (biggest power consumer)
+    // Shut down RF core (main loop will re-init after wakeup)
     oepl_rf_shutdown();
 
-    // Use AON_RTC for accurate sleep timing (16.16 format)
+    // Power off PERIPH domain (GPIO) and SERIAL domain
+    HWREG(PRCM_BASE + PRCM_O_PDCTL0PERIPH) = 0;
+    HWREG(PRCM_BASE + PRCM_O_PDCTL0SERIAL) = 0;
+
+    // Configure RTC wakeup (16.16 fixed-point format: seconds in upper 16 bits)
     AONRTCEnable();
     uint32_t now = AONRTCCurrentCompareValueGet();
     uint32_t target = now + (seconds << 16);
+    AONRTCCompareValueSet(AON_RTC_CH0, target);
+    AONRTCChannelEnable(AON_RTC_CH0);
+    AONRTCEventClear(AON_RTC_CH0);
 
-    // Poll RTC until target time reached (~10ms between checks)
-    while ((int32_t)(AONRTCCurrentCompareValueGet() - target) < 0) {
-        delay_cycles(480000);
-    }
+    // Configure combined event to include CH0 — drives INT_AON_RTC_COMB.
+    // Without this, CH0 compare match never reaches NVIC, WFI never wakes.
+    AONRTCCombinedEventConfig(AON_RTC_CH0);
+
+    // Clear stale NVIC pending + enable RTC NVIC interrupt
+    IntPendClear(INT_AON_RTC_COMB);
+    IntEnable(INT_AON_RTC_COMB);
+
+    // Save warm boot magic for WFI return path (JLink may prevent full standby)
+    warmboot_magic_a = WARMBOOT_MAGIC_A;
+    warmboot_magic_b = WARMBOOT_MAGIC_B;
+
+    // Route RTC CH0 to MCU wakeup event (for PRCM standby wakeup)
+    AONEventMcuWakeUpSet(AON_EVENT_MCU_WU0, AON_EVENT_RTC_CH0);
+
+    // Configure MCU power-down settings
+    AONWUCMcuPowerDownConfig(AONWUC_CLOCK_SRC_LF);
+    AONWUCMcuSRamConfig(MCU_RAM_BLOCK_RETENTION);
+    SysCtrlSetRechargeBeforePowerDown(XOSC_IN_HIGH_POWER_MODE);
+    SysCtrlAonSync();
+
+    // Freeze IO latches before standby — preserves pin state during power-down
+    // and enables standby wakeup detection (IOCLATCH_EN == 0 means woke from standby).
+    AONIOCFreezeEnable();
+
+    // Deep sleep: SLEEPDEEP + WFI via PRCM.
+    // Two outcomes: (1) WFI returns normally, or (2) PRCM does full standby
+    // and wakeup goes through reset vector (warm boot detected in main).
+    PRCMDeepSleep();
+
+    // --- If we reach here, WFI returned (no reset-path wakeup) ---
+    AONIOCFreezeDisable();
+    warmboot_magic_a = 0;
+    warmboot_magic_b = 0;
+    IntDisable(INT_AON_RTC_COMB);
+    IntPendClear(INT_AON_RTC_COMB);
+    AONRTCEventClear(AON_RTC_CH0);
+
+    // Re-enable PERIPH domain for GPIO
+    HWREG(PRCM_BASE + PRCM_O_PDCTL0PERIPH) = 1;
+    for (volatile uint32_t i = 0; i < 500000; i++)
+        if (HWREG(PRCM_BASE + PRCM_O_PDSTAT0PERIPH) & 1) break;
+    HWREG(PRCM_BASE + PRCM_O_GPIOCLKGR) = 0x01;
+    HWREG(PRCM_NONBUF_BASE + PRCM_O_CLKLOADCTL) = 0x01;
+    for (volatile uint32_t i = 0; i < 500000; i++)
+        if (HWREG(PRCM_BASE + PRCM_O_CLKLOADCTL) & 0x02) break;
 
     rtt_puts("WAKE\r\n");
 }
@@ -346,6 +415,28 @@ int main(void)
     // --- Init RTT first (so we can debug early) ---
     rtt_init();
 
+    // --- Check for warm boot (wakeup from standby) ---
+    // Three detection methods (any one is sufficient):
+    //   1. AON IOC latch frozen (IOCLATCH_EN==0) — set by enter_sleep() before standby.
+    //      This is the TI-recommended approach: SetupTrimDevice() uses the same check.
+    //   2. Hardware reset source = WAKEUP_FROM_SHUTDOWN (deep shutdown wakeup)
+    //   3. SRAM magic intact (WFI return path, JLink preventing full standby)
+    bool ioc_frozen = (HWREG(AON_IOC_BASE + AON_IOC_O_IOCLATCH) & AON_IOC_IOCLATCH_EN) == 0;
+    bool warm_boot = ioc_frozen ||
+                     (SysCtrlResetSourceGet() == RSTSRC_WAKEUP_FROM_SHUTDOWN) ||
+                     (warmboot_magic_a == WARMBOOT_MAGIC_A &&
+                      warmboot_magic_b == WARMBOOT_MAGIC_B);
+    warmboot_magic_a = 0;
+    warmboot_magic_b = 0;
+
+    // --- Post-standby adjustments ---
+    if (warm_boot) {
+        // Unfreeze IO latches so GPIO operations work normally
+        AONIOCFreezeDisable();
+        SysCtrlAonUpdate();
+        SysCtrlAdjustRechargeAfterPowerDown(0);
+    }
+
     // --- Power up PERIPH domain (for GPIO) ---
     HWREG(PRCM_BASE + PRCM_O_PDCTL0PERIPH) = 1;
     for (volatile uint32_t i = 0; i < 500000; i++)
@@ -357,11 +448,15 @@ int main(void)
     for (volatile uint32_t i = 0; i < 500000; i++)
         if (HWREG(PRCM_BASE + PRCM_O_CLKLOADCTL) & 0x02) break;
 
-    // Wait for RTT client to connect
-    delay_cycles(24000000);  // ~3 seconds
+    if (warm_boot) {
+        delay_cycles(4800000);  // ~0.1s (shorter — no RTT client to wait for)
+        rtt_puts("\r\n=== CC2630 OEPL Tag (WARM) ===\r\n");
+    } else {
+        delay_cycles(24000000);  // ~3 seconds (wait for RTT client)
+        rtt_puts("\r\n=== CC2630 OEPL Tag ===\r\n");
+    }
 
     // --- Boot message ---
-    rtt_puts("\r\n=== CC2630 OEPL Tag ===\r\n");
     rtt_puts("RST=");
     rtt_put_hex8((uint8_t)SysCtrlResetSourceGet());
     rtt_puts("\r\n");
@@ -390,8 +485,8 @@ int main(void)
     // --- Initialize OEPL radio protocol layer ---
     oepl_radio_init();
 
-    // --- Splash screen: scan for AP and show boot info ---
-    {
+    // --- Splash screen only on cold boot ---
+    if (!warm_boot) {
         int8_t splash_ch = oepl_radio_scan_channels();
         int8_t temp_c;
         uint16_t bat_mv;
@@ -401,11 +496,12 @@ int main(void)
         splash_display(mac, bat_mv, temp_c, splash_ch >= 0, rst->current_ieee_ch);
     }
 
-    // --- Main loop: periodic checkin + download ---
-    // First 2 checkins use busy-wait (keeps JLink/RTT alive for debugging).
-    // After that, use WFI sleep (CPU halts, RF powered off, RTC wakeup).
+    // --- Main loop: periodic checkin + sleep ---
+    // Cold boot: first 2 checkins use busy-wait (for JLink/RTT debugging).
+    // After that, use deep standby (MCU VD powers off, RTC wakeup).
+    // Warm boot: go directly to standby sleep (already proven working).
     uint32_t checkin_count = 0;
-    bool use_sleep = false;
+    bool use_sleep = warm_boot;
     while (1) {
         rtt_puts("\r\n=== Checkin #");
         rtt_put_hex32(checkin_count);

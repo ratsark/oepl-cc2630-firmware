@@ -138,7 +138,7 @@ $(BUILD_DIR)/$(PROJECT).elf: $(OBJECTS)
 # Create binary (with CCFG at end - will be 128KB)
 $(BIN_DIR)/$(PROJECT).bin: $(BUILD_DIR)/$(PROJECT).elf | $(BIN_DIR)
 	@echo "OBJCOPY $@"
-	@$(OBJCOPY) -O binary $< $@
+	@$(OBJCOPY) -O binary --gap-fill=0xFF $< $@
 	@echo "Firmware binary created: $@"
 
 # Create OTA binary (no CCFG section — just firmware code + data)
