@@ -22,7 +22,7 @@
 #define SYSTEM_CLK_HZ   48000000
 
 // Ring buffer size — must be power of 2 for efficient masking
-#define RTT_BUFFER_SIZE 512
+#define RTT_BUFFER_SIZE 2048
 
 // RTT buffer descriptor (matches SEGGER's layout exactly)
 typedef struct {

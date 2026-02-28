@@ -26,13 +26,11 @@
 // RTC-timed sleep
 #include "aon_rtc.h"
 
-// Deep sleep: AON wakeup controller, event routing, VIMS cache, interrupts
+// Deep sleep: AON wakeup controller, event routing, interrupts, IO latch
 #include "aon_wuc.h"
 #include "aon_event.h"
-#include "vims.h"
 #include "interrupt.h"
 #include "hw_ints.h"
-#include "hw_aon_rtc.h"
 #include "aon_ioc.h"
 
 // Block buffers for image download (4100 bytes each: 4-byte header + 4096 data)
@@ -64,9 +62,13 @@ void AON_RTC_Handler(void)
 
 // Enter deep sleep with RTC-timed wakeup.
 //
-// WFI sleep with power domain management.
-// Shuts down RF core and PERIPH/SERIAL domains for lower power during sleep.
-// Uses plain WFI (no SLEEPDEEP) — CPU is clock-gated, wakes on RTC interrupt.
+// Follows TI's SysCtrlStandby sequence: shuts down all power domains
+// (RF, PERIPH, SERIAL, CPU, VIMS), gates deep-sleep clocks, requests uLDO,
+// freezes IO, then enters standby via PRCMDeepSleep (SLEEPDEEP + WFI).
+//
+// Two outcomes:
+//   1. WFI returns (JLink C_DEBUGEN blocks standby): loop continues
+//   2. Full standby → reset: warm boot detected in main() via IOC latch
 static void enter_sleep(uint32_t seconds)
 {
     rtt_puts("SLEEP ");
@@ -76,10 +78,6 @@ static void enter_sleep(uint32_t seconds)
 
     // Shut down RF core (main loop will re-init after wakeup)
     oepl_rf_shutdown();
-
-    // Power off PERIPH domain (GPIO) and SERIAL domain
-    HWREG(PRCM_BASE + PRCM_O_PDCTL0PERIPH) = 0;
-    HWREG(PRCM_BASE + PRCM_O_PDCTL0SERIAL) = 0;
 
     // Configure RTC wakeup (16.16 fixed-point format: seconds in upper 16 bits)
     AONRTCEnable();
@@ -97,29 +95,31 @@ static void enter_sleep(uint32_t seconds)
     IntPendClear(INT_AON_RTC_COMB);
     IntEnable(INT_AON_RTC_COMB);
 
-    // Save warm boot magic for WFI return path (JLink may prevent full standby)
+    // Save warm boot magic for WFI return path
     warmboot_magic_a = WARMBOOT_MAGIC_A;
     warmboot_magic_b = WARMBOOT_MAGIC_B;
 
     // Route RTC CH0 to MCU wakeup event (for PRCM standby wakeup)
     AONEventMcuWakeUpSet(AON_EVENT_MCU_WU0, AON_EVENT_RTC_CH0);
 
-    // Configure MCU power-down settings
-    AONWUCMcuPowerDownConfig(AONWUC_CLOCK_SRC_LF);
-    AONWUCMcuSRamConfig(MCU_RAM_BLOCK_RETENTION);
-    SysCtrlSetRechargeBeforePowerDown(XOSC_IN_HIGH_POWER_MODE);
+    // --- Standby configuration ---
+    // SERIAL domain off crashes consistently (tests 6-8). Skip it.
+    // PERIPH off + IOC freeze + PRCMDeepSleep = working standby.
+
+    // Power off PERIPH domain (GPIO, Timer, UDMA)
+    PRCMPowerDomainOff(PRCM_DOMAIN_PERIPH);
+
+    // Freeze IO for warm boot detection
+    AONIOCFreezeEnable();
     SysCtrlAonSync();
 
-    // Freeze IO latches before standby — preserves pin state during power-down
-    // and enables standby wakeup detection (IOCLATCH_EN == 0 means woke from standby).
-    AONIOCFreezeEnable();
+    rtt_puts("SLEEP WFI\r\n");
 
-    // Deep sleep: SLEEPDEEP + WFI via PRCM.
-    // Two outcomes: (1) WFI returns normally, or (2) PRCM does full standby
-    // and wakeup goes through reset vector (warm boot detected in main).
+    // Enter deep sleep
     PRCMDeepSleep();
 
-    // --- If we reach here, WFI returned (no reset-path wakeup) ---
+    // --- If we reach here, WFI returned (JLink C_DEBUGEN prevents standby) ---
+
     AONIOCFreezeDisable();
     warmboot_magic_a = 0;
     warmboot_magic_b = 0;
@@ -192,6 +192,7 @@ bool download_block(uint8_t block_id, struct AvailDataInfo *info,
     memset(parts_rcvd, 0, sizeof(parts_rcvd));
     memset(buf, 0x00, BLOCK_XFER_BUFFER_SIZE);
 
+    uint8_t zero_count = 0;  // consecutive attempts with 0 parts received
     for (uint8_t attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             rtt_puts("R");
@@ -209,6 +210,16 @@ bool download_block(uint8_t block_id, struct AvailDataInfo *info,
             rtt_puts("~");
             *out_size = BLOCK_XFER_BUFFER_SIZE;
             return true;
+        }
+        // If AP isn't responding at all (0 parts, 3 times), give up early
+        if (got == 0) {
+            zero_count++;
+            if (zero_count >= 3) {
+                rtt_puts("X");
+                break;
+            }
+        } else {
+            zero_count = 0;
         }
     }
     rtt_puts("!");
@@ -257,6 +268,12 @@ static void get_image_bytes(uint32_t offset, uint8_t *out, uint16_t len,
                              struct AvailDataInfo *info, bool is_red_plane)
 {
     while (len > 0) {
+        // If too many blocks have failed, AP has nothing — fill white and stop
+        if (dl_failed_blocks >= 3) {
+            memset(out, 0x00, len);
+            return;
+        }
+
         uint8_t block_id = (uint8_t)(offset / BLOCK_DATA_SIZE);
         uint16_t block_off = (uint16_t)(offset % BLOCK_DATA_SIZE);
         uint16_t avail = (uint16_t)BLOCK_DATA_SIZE - block_off;
@@ -340,6 +357,16 @@ static bool download_and_display(struct AvailDataInfo *info)
     uint8_t row_4bpp[300];
 
     for (uint16_t y = 0; y < height; y++) {
+        // Abort early if AP clearly has nothing to serve
+        if (dl_failed_blocks >= 3) {
+            rtt_puts("\r\nABORT: AP not serving data\r\n");
+            // Fill remaining rows with white
+            memset(row_4bpp, 0x33, 300);  // 0x33 = white/white nibbles
+            for (uint16_t remain = y; remain < height; remain++)
+                oepl_hw_spi_send_raw(row_4bpp, 300);
+            break;
+        }
+
         uint32_t bw_offset = (uint32_t)y * row_bytes;
 
         // Get B/W line (failed blocks auto-fill white via ensure_bw_block)
@@ -416,22 +443,18 @@ int main(void)
     rtt_init();
 
     // --- Check for warm boot (wakeup from standby) ---
-    // Three detection methods (any one is sufficient):
-    //   1. AON IOC latch frozen (IOCLATCH_EN==0) — set by enter_sleep() before standby.
-    //      This is the TI-recommended approach: SetupTrimDevice() uses the same check.
-    //   2. Hardware reset source = WAKEUP_FROM_SHUTDOWN (deep shutdown wakeup)
-    //   3. SRAM magic intact (WFI return path, JLink preventing full standby)
+    // Primary: IOC latch frozen (IOCLATCH_EN==0) — set by enter_sleep() before
+    //   standby, synced via SysCtrlAonSync. TI-recommended detection method.
+    // Fallback: SRAM magic in .noinit (survives WFI return + fault resets).
     bool ioc_frozen = (HWREG(AON_IOC_BASE + AON_IOC_O_IOCLATCH) & AON_IOC_IOCLATCH_EN) == 0;
     bool warm_boot = ioc_frozen ||
-                     (SysCtrlResetSourceGet() == RSTSRC_WAKEUP_FROM_SHUTDOWN) ||
                      (warmboot_magic_a == WARMBOOT_MAGIC_A &&
                       warmboot_magic_b == WARMBOOT_MAGIC_B);
     warmboot_magic_a = 0;
     warmboot_magic_b = 0;
 
-    // --- Post-standby adjustments ---
-    if (warm_boot) {
-        // Unfreeze IO latches so GPIO operations work normally
+    // Post-standby adjustments
+    if (ioc_frozen) {
         AONIOCFreezeDisable();
         SysCtrlAonUpdate();
         SysCtrlAdjustRechargeAfterPowerDown(0);
@@ -459,6 +482,10 @@ int main(void)
     // --- Boot message ---
     rtt_puts("RST=");
     rtt_put_hex8((uint8_t)SysCtrlResetSourceGet());
+    rtt_puts(" IOC=");
+    rtt_put_hex8(ioc_frozen ? 1 : 0);
+    rtt_puts(" WARM=");
+    rtt_put_hex8(warm_boot ? 1 : 0);
     rtt_puts("\r\n");
 
     // Print MAC in human-readable form
@@ -487,6 +514,8 @@ int main(void)
 
     // --- Splash screen only on cold boot ---
     if (!warm_boot) {
+        rtt_puts("SPLASH: drawing\r\n");
+        oepl_radio_set_wakeup_reason(WAKEUP_REASON_SPLASH);
         int8_t splash_ch = oepl_radio_scan_channels();
         int8_t temp_c;
         uint16_t bat_mv;
@@ -494,6 +523,9 @@ int main(void)
         oepl_hw_get_voltage(&bat_mv);
         radio_state_t *rst = oepl_radio_get_state();
         splash_display(mac, bat_mv, temp_c, splash_ch >= 0, rst->current_ieee_ch);
+        rtt_puts("SPLASH: done\r\n");
+    } else {
+        rtt_puts("WARM BOOT: skipping splash\r\n");
     }
 
     // --- Main loop: periodic checkin + sleep ---

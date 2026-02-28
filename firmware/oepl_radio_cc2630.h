@@ -32,6 +32,7 @@
 
 // Wakeup reasons
 #define WAKEUP_REASON_TIMED         0
+#define WAKEUP_REASON_SPLASH        0xFB
 #define WAKEUP_REASON_FIRSTBOOT     0xFC
 #define WAKEUP_REASON_NETWORK_SCAN  0xFD
 

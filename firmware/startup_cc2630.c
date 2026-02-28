@@ -191,7 +191,9 @@ void HardFault_Handler(void)
     rtt_puts("CFSR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED28); rtt_puts("\r\n");
     rtt_puts("BFAR="); rtt_put_hex32(*(volatile uint32_t *)0xE000ED38); rtt_puts("\r\n");
 
-    fault_reset();
+    // Spin forever so RTT output is preserved for debugging.
+    // JLink can read the buffer; no reset to overwrite it.
+    while (1) __asm volatile("nop");
 }
 
 void Default_Handler(void)
