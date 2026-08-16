@@ -97,6 +97,37 @@ static rf_status_t rf_send_cmd(uint32_t cmd_ptr)
     return RF_OK;
 }
 
+// Send CMD_ABORT with bounded waits, unlike driverlib's RFCDoorbellSendTo().
+// That function spins forever on both the doorbell-free check and the
+// RFACKIFG ack — if the RF core is already idle (nothing to abort) or
+// otherwise fails to ack, it hangs the CPU permanently with no way to
+// recover short of a physical power cycle. This is used to stop RX
+// sessions and to shut the RF core down before sleep, both on paths that
+// don't strictly need the abort to succeed (rx_stop clears state itself;
+// shutdown power-cycles the whole RF core domain right after anyway).
+static void rf_abort_bounded(void)
+{
+    uint32_t i;
+    for (i = 0; i < 100000; i++) {
+        if (HWREG(RFC_DBELL_BASE + RFC_DBELL_O_CMDR) == 0) break;
+    }
+    if (i >= 100000) {
+        rtt_puts("RF: abort skipped (doorbell busy)\r\n");
+        return;
+    }
+
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG) = 0;
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_CMDR) = CMDR_DIR_CMD(CMD_ABORT);
+
+    for (i = 0; i < 100000; i++) {
+        if (HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG)) break;
+    }
+    if (i >= 100000) {
+        rtt_puts("RF: abort no ACK\r\n");
+    }
+    HWREG(RFC_DBELL_BASE + RFC_DBELL_O_RFACKIFG) = 0;
+}
+
 static rf_status_t rf_wait_cmd_done(volatile uint16_t *status_ptr, uint32_t timeout_loops)
 {
     // Status field bits [11:10]:
@@ -444,7 +475,7 @@ uint16_t oepl_rf_rx_status(void)
 void oepl_rf_rx_stop(void)
 {
     // Send CMD_ABORT to stop RX
-    RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_ABORT));
+    rf_abort_bounded();
 
     // Wait for RX command to finish
     rf_wait_cmd_done(&rf_cmd_rx.status, 100000);
@@ -478,7 +509,7 @@ void oepl_rf_rx_flush(void)
 void oepl_rf_shutdown(void)
 {
     // Abort any running command
-    RFCDoorbellSendTo(CMDR_DIR_CMD(CMD_ABORT));
+    rf_abort_bounded();
 
     // Wait briefly
     for (volatile uint32_t i = 0; i < 10000; i++) __asm volatile("nop");
