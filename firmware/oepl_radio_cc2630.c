@@ -321,8 +321,9 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
     rtt_puts("BRQ b=");
     rtt_put_hex8(block_id);
 
-    // Single long RX session: covers ack + wait + all parts (15s)
-    rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, 15000000);
+    // Hardware end-trigger is just a backstop; the real deadline is tracked
+    // below against the AON RTC ms clock (see BLOCK_ACK_WAIT_MS et al).
+    rf_status_t rc = oepl_rf_rx_start(radio_st.current_ieee_ch, BLOCK_RX_HW_TIMEOUT_US);
     if (rc != RF_OK) { rtt_puts(" RXfail\r\n"); return total_parts; }
 
     // TX block request
@@ -334,34 +335,50 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
     }
     rtt_puts(" TX+\r\n");
 
-    // Receive ack + parts in one continuous RX session
+    // Receive ack + parts in one continuous RX session. Deadline starts as
+    // a short ack wait; once the ack (or a part, if it beats the ack)
+    // arrives, it's pushed out to cover the AP's requested pleaseWaitMs
+    // plus a short part-burst window — mirrors the official tag firmware's
+    // ack + pleaseWaitMs + blockRxLoop(295ms) sequence, without needing to
+    // tear down and restart the RX command between phases.
     bool got_ack = false;
     uint8_t other_pkts = 0;
+    uint32_t deadline = oepl_hw_get_time_ms() + BLOCK_ACK_WAIT_MS;
 
-    for (volatile uint32_t w = 0; w < 30000000; w++) {
+    // Exit is governed by the ms deadline (and total_parts completion)
+    // below, not oepl_rf_rx_status(): polling that every iteration (rather
+    // than the old code's sparse ~1M-iteration throttle) can catch a brief
+    // non-ACTIVE blip in the TX-to-RX turnaround and bail before any part
+    // has a chance to arrive. The RX hardware timeout is a generous backstop
+    // regardless, so there's nothing to gain from checking status here.
+    while ((int32_t)(oepl_hw_get_time_ms() - deadline) < 0) {
         uint8_t pkt_len;
         int8_t rssi;
         uint8_t *pkt = oepl_rf_rx_get(&pkt_len, &rssi);
-        if (!pkt) {
-            // Periodically check if RX is still active
-            if ((w & 0xFFFFF) == 0 && w > 0) {
-                if (oepl_rf_rx_status() != ACTIVE) break;
-            }
-            continue;
-        }
+        if (!pkt) continue;
 
         // Parse header size from frame control
         uint8_t hsz = mac_hdr_size(pkt, pkt_len);
         if (hsz > 0 && pkt_len > hsz) {
             uint8_t pkt_type = pkt[hsz];
 
-            if (pkt_type == PKT_BLOCK_REQUEST_ACK && pkt_len >= hsz + 1 + 3) {
+            if (pkt_type == PKT_BLOCK_REQUEST_ACK &&
+                pkt_len >= hsz + 1 + sizeof(struct BlockRequestAck)) {
                 struct BlockRequestAck *ack = (struct BlockRequestAck *)&pkt[hsz + 1];
-                got_ack = true;
-                rtt_puts("ACK w=");
-                rtt_put_hex8((ack->pleaseWaitMs >> 8) & 0xFF);
-                rtt_put_hex8(ack->pleaseWaitMs & 0xFF);
-                rtt_puts("\r\n");
+                // Not checksum-gated: this AP's ack packets don't carry a
+                // checksum this build's additive scheme validates (unlike
+                // AvailDataInfo/BlockRequest, which do) — trust size/type.
+                if (!got_ack) {
+                    got_ack = true;
+                    rtt_puts("ACK w=");
+                    rtt_put_hex8((ack->pleaseWaitMs >> 8) & 0xFF);
+                    rtt_put_hex8(ack->pleaseWaitMs & 0xFF);
+                    rtt_puts("\r\n");
+
+                    uint16_t wait_ms = ack->pleaseWaitMs;
+                    if (wait_ms > BLOCK_MAX_WAIT_MS) wait_ms = BLOCK_MAX_WAIT_MS;
+                    deadline = oepl_hw_get_time_ms() + wait_ms + BLOCK_PART_WINDOW_MS;
+                }
             } else if (pkt_type == PKT_BLOCK_PART &&
                        pkt_len >= hsz + 1 + sizeof(struct BlockPart)) {
                 struct BlockPart *bp = (struct BlockPart *)&pkt[hsz + 1];
@@ -378,6 +395,10 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
                         parts_rcvd[byte_idx] |= (1 << bit_idx);
                         total_parts++;
                     }
+                    // Data is flowing (possibly before we ever saw the ack)
+                    // — keep the window open long enough for the rest of it.
+                    uint32_t part_deadline = oepl_hw_get_time_ms() + BLOCK_PART_WINDOW_MS;
+                    if ((int32_t)(part_deadline - deadline) > 0) deadline = part_deadline;
                 }
             } else {
                 other_pkts++;

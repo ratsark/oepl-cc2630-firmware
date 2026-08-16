@@ -30,6 +30,15 @@
 #define BLOCK_XFER_BUFFER_SIZE  (BLOCK_DATA_SIZE + BLOCK_HEADER_SIZE)  // 4100
 #define BLOCK_REQ_PARTS_BYTES   6
 
+// Block-part RX timing, modeled on the official OEPL ZBS243 tag firmware
+// (tag_fw/syncedproto.c: performBlockRequest + blockRxLoop(295, ...)):
+// wait briefly for the ack, honor its pleaseWaitMs, then listen for parts
+// in a short window — instead of one long fixed RX window per attempt.
+#define BLOCK_ACK_WAIT_MS       400     // how long to wait for BlockRequestAck
+#define BLOCK_PART_WINDOW_MS    350     // listen window once data starts flowing
+#define BLOCK_MAX_WAIT_MS       3000    // clamp on AP-supplied pleaseWaitMs
+#define BLOCK_RX_HW_TIMEOUT_US  5000000UL  // hardware backstop, well above the above
+
 // Wakeup reasons
 #define WAKEUP_REASON_TIMED         0
 #define WAKEUP_REASON_SPLASH        0xFB
