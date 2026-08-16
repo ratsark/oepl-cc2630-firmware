@@ -14,6 +14,7 @@
 #include "hw_memmap.h"
 #include "hw_types.h"  // for HWREG
 #include "aon_batmon.h"
+#include "aon_rtc.h"
 
 // Pin assignments — from STOCK FIRMWARE binary analysis (v29)
 // SPI pins: MOSI/MISO swapped vs OEPL HAL! Stock has mosiPin=9, misoPin=8
@@ -206,7 +207,13 @@ void oepl_hw_delay_us(uint32_t us)
 
 uint32_t oepl_hw_get_time_ms(void)
 {
-    return 0;  // Not implemented — not needed for display driver
+    // AON_RTC free-runs off the always-on domain; enabling it is a single
+    // idempotent register bit, so no separate one-time init is needed.
+    AONRTCEnable();
+    uint32_t raw = AONRTCCurrentCompareValueGet();  // <16.16>: seconds.fraction
+    uint32_t sec = raw >> 16;
+    uint32_t frac_ms = (raw & 0xFFFF) * 1000UL >> 16;
+    return sec * 1000UL + frac_ms;
 }
 
 bool oepl_hw_get_temperature(int8_t* temp_degc)

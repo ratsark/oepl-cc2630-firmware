@@ -192,12 +192,13 @@ bool download_block(uint8_t block_id, struct AvailDataInfo *info,
     memset(parts_rcvd, 0, sizeof(parts_rcvd));
     memset(buf, 0x00, BLOCK_XFER_BUFFER_SIZE);
 
+    // Attempt count and backoff modeled on the official OEPL ZBS243 tag
+    // firmware's BLOCK_TRANSFER_ATTEMPTS=5 — spacing between attempts now
+    // comes from the AP's own pleaseWaitMs (handled inside
+    // oepl_radio_request_block), not a fixed extra delay here.
     uint8_t zero_count = 0;  // consecutive attempts with 0 parts received
-    for (uint8_t attempt = 0; attempt < 15; attempt++) {
-        if (attempt > 0) {
-            rtt_puts("R");
-            oepl_hw_delay_ms(500);
-        }
+    for (uint8_t attempt = 0; attempt < 5; attempt++) {
+        if (attempt > 0) rtt_puts("R");
         uint8_t got = oepl_radio_request_block(block_id, info->dataVer, info->dataType,
                                                 buf, parts_rcvd);
         if (got >= BLOCK_MAX_PARTS) {
@@ -205,16 +206,17 @@ bool download_block(uint8_t block_id, struct AvailDataInfo *info,
             *out_size = BLOCK_XFER_BUFFER_SIZE;
             return true;
         }
-        // Accept 41/42 only after 8 attempts
-        if (got >= BLOCK_MAX_PARTS - 1 && attempt >= 7) {
+        // Accept 41/42 once only one attempt remains rather than burning
+        // the whole budget chasing a single chronically-lost part.
+        if (got >= BLOCK_MAX_PARTS - 1 && attempt >= 3) {
             rtt_puts("~");
             *out_size = BLOCK_XFER_BUFFER_SIZE;
             return true;
         }
-        // If AP isn't responding at all (0 parts, 3 times), give up early
+        // If AP isn't responding at all (0 parts, twice), give up early
         if (got == 0) {
             zero_count++;
-            if (zero_count >= 3) {
+            if (zero_count >= 2) {
                 rtt_puts("X");
                 break;
             }
