@@ -57,7 +57,7 @@ static void delay_cycles(volatile uint32_t n)
 // because the Cortex-M3 requires an NVIC-enabled interrupt to wake.
 void AON_RTC_Handler(void)
 {
-    AONRTCEventClear(AON_RTC_CH0);
+    AONRTCEventClear(AON_RTC_CH1);
 }
 
 // Enter deep sleep with RTC-timed wakeup.
@@ -80,16 +80,19 @@ static void enter_sleep(uint32_t seconds)
     oepl_rf_shutdown();
 
     // Configure RTC wakeup (16.16 fixed-point format: seconds in upper 16 bits)
+    // Uses CH1, not CH0: CH0's compare event flag never sets on this chip
+    // (confirmed by hardware testing — see commit 1397067). CH1 works.
     AONRTCEnable();
     uint32_t now = AONRTCCurrentCompareValueGet();
     uint32_t target = now + (seconds << 16);
-    AONRTCCompareValueSet(AON_RTC_CH0, target);
-    AONRTCChannelEnable(AON_RTC_CH0);
-    AONRTCEventClear(AON_RTC_CH0);
+    AONRTCModeCh1Set(AON_RTC_MODE_CH1_COMPARE);
+    AONRTCCompareValueSet(AON_RTC_CH1, target);
+    AONRTCChannelEnable(AON_RTC_CH1);
+    AONRTCEventClear(AON_RTC_CH1);
 
-    // Configure combined event to include CH0 — drives INT_AON_RTC_COMB.
-    // Without this, CH0 compare match never reaches NVIC, WFI never wakes.
-    AONRTCCombinedEventConfig(AON_RTC_CH0);
+    // Configure combined event to include CH1 — drives INT_AON_RTC_COMB.
+    // Without this, CH1 compare match never reaches NVIC, WFI never wakes.
+    AONRTCCombinedEventConfig(AON_RTC_CH1);
 
     // Clear stale NVIC pending + enable RTC NVIC interrupt
     IntPendClear(INT_AON_RTC_COMB);
@@ -99,8 +102,8 @@ static void enter_sleep(uint32_t seconds)
     warmboot_magic_a = WARMBOOT_MAGIC_A;
     warmboot_magic_b = WARMBOOT_MAGIC_B;
 
-    // Route RTC CH0 to MCU wakeup event (for PRCM standby wakeup)
-    AONEventMcuWakeUpSet(AON_EVENT_MCU_WU0, AON_EVENT_RTC_CH0);
+    // Route RTC CH1 to MCU wakeup event (for PRCM standby wakeup)
+    AONEventMcuWakeUpSet(AON_EVENT_MCU_WU0, AON_EVENT_RTC_CH1);
 
     // --- Standby configuration ---
     // SERIAL domain off crashes consistently (tests 6-8). Skip it.
@@ -108,6 +111,15 @@ static void enter_sleep(uint32_t seconds)
 
     // Power off PERIPH domain (GPIO, Timer, UDMA)
     PRCMPowerDomainOff(PRCM_DOMAIN_PERIPH);
+
+    // Prime the adaptive recharge controller before power-down (driverlib
+    // docs: "shall be called just before entering Power Down"). Without
+    // this, the recharge controller is never configured before the first
+    // PRCMDeepSleep() call, which was reliably hanging inside TI's ROM
+    // standby-entry sequence (confirmed via JLink: PC stuck polling an
+    // AON_RTC-region register, reproducible across multiple sleep cycles).
+    // Paired with SysCtrlAdjustRechargeAfterPowerDown() on wake.
+    SysCtrlSetRechargeBeforePowerDown(XOSC_IN_HIGH_POWER_MODE);
 
     // Freeze IO for warm boot detection
     AONIOCFreezeEnable();
@@ -125,7 +137,7 @@ static void enter_sleep(uint32_t seconds)
     warmboot_magic_b = 0;
     IntDisable(INT_AON_RTC_COMB);
     IntPendClear(INT_AON_RTC_COMB);
-    AONRTCEventClear(AON_RTC_CH0);
+    AONRTCEventClear(AON_RTC_CH1);
 
     // Re-enable PERIPH domain for GPIO
     HWREG(PRCM_BASE + PRCM_O_PDCTL0PERIPH) = 1;
