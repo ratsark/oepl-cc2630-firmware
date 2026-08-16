@@ -345,14 +345,17 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
     uint8_t other_pkts = 0;
     uint32_t deadline = oepl_hw_get_time_ms() + BLOCK_ACK_WAIT_MS;
 
+    // Exit is governed by the ms deadline (and total_parts completion)
+    // below, not oepl_rf_rx_status(): polling that every iteration (rather
+    // than the old code's sparse ~1M-iteration throttle) can catch a brief
+    // non-ACTIVE blip in the TX-to-RX turnaround and bail before any part
+    // has a chance to arrive. The RX hardware timeout is a generous backstop
+    // regardless, so there's nothing to gain from checking status here.
     while ((int32_t)(oepl_hw_get_time_ms() - deadline) < 0) {
         uint8_t pkt_len;
         int8_t rssi;
         uint8_t *pkt = oepl_rf_rx_get(&pkt_len, &rssi);
-        if (!pkt) {
-            if (oepl_rf_rx_status() != ACTIVE) break;
-            continue;
-        }
+        if (!pkt) continue;
 
         // Parse header size from frame control
         uint8_t hsz = mac_hdr_size(pkt, pkt_len);
@@ -362,7 +365,10 @@ uint8_t oepl_radio_request_block(uint8_t block_id, uint64_t data_ver, uint8_t da
             if (pkt_type == PKT_BLOCK_REQUEST_ACK &&
                 pkt_len >= hsz + 1 + sizeof(struct BlockRequestAck)) {
                 struct BlockRequestAck *ack = (struct BlockRequestAck *)&pkt[hsz + 1];
-                if (!got_ack && check_crc(ack, sizeof(struct BlockRequestAck))) {
+                // Not checksum-gated: this AP's ack packets don't carry a
+                // checksum this build's additive scheme validates (unlike
+                // AvailDataInfo/BlockRequest, which do) — trust size/type.
+                if (!got_ack) {
                     got_ack = true;
                     rtt_puts("ACK w=");
                     rtt_put_hex8((ack->pleaseWaitMs >> 8) & 0xFF);
