@@ -78,16 +78,19 @@ QUOTES = load_quotes()
 # Layout (a drawcustom payload; `q` is set by the automation from QUOTES)
 # ---------------------------------------------------------------------------
 
-SIZE_TPL = "{% if q|length > 300 %}24{% elif q|length > 220 %}27{% elif q|length > 150 %}30{% elif q|length > 90 %}34{% else %}40{% endif %}"
+# (max length, font px, line spacing px): one table drives both the local preview
+# and the Jinja the automation evaluates, so the two can't drift apart.
+SIZE_TABLE = [(90, 40, 8), (150, 34, 8), (220, 30, 8), (300, 27, 6), (380, 24, 5), (460, 22, 4), (10**9, 20, 3)]
+SIZE_TPL = "{% " + " el".join("if q|length <= %d %%}%d{%%" % (n, px) for n, px, _ in SIZE_TABLE) + " endif %}"
+SPACING_TPL = "{% " + " el".join("if q|length <= %d %%}%d{%%" % (n, sp) for n, _, sp in SIZE_TABLE) + " endif %}"
 
 
 def size_for(q):
-    """Same rule as SIZE_TPL, for the local preview."""
-    n = len(q)
-    return 24 if n > 300 else 27 if n > 220 else 30 if n > 150 else 34 if n > 90 else 40
+    """Same rule as SIZE_TPL/SPACING_TPL, for the local preview: (px, spacing)."""
+    return next((px, sp) for n, px, sp in SIZE_TABLE if len(q) <= n)
 
 
-def build_payload(q="{{ q }}", size=SIZE_TPL):
+def build_payload(q="{{ q }}", size=SIZE_TPL, spacing=SPACING_TPL):
     L, R = 28, 572
     return [
         # frame: a thin black rule with a red inner rule
@@ -104,7 +107,7 @@ def build_payload(q="{{ q }}", size=SIZE_TPL):
         {"type": "icon", "value": "format-quote-close", "x": R, "y": 396, "size": 64, "color": "red", "anchor": "rb"},
         # the thought, wrapped and centred in the space between the marks
         {"type": "text", "value": q, "x": 300, "y": 246, "size": size, "font": "rbm.ttf",
-         "color": "black", "anchor": "mm", "align": "center", "max_width": 470, "spacing": 8},
+         "color": "black", "anchor": "mm", "align": "center", "max_width": 470, "spacing": spacing},
     ]
 
 
@@ -213,10 +216,11 @@ def render(payload):
 def cmd_preview(out_prefix):
     """Render the shortest, a middling and the longest quote to PNGs."""
     qs = sorted(QUOTES, key=len)
-    for tag, q in (("short", qs[0]), ("mid", qs[len(qs) // 2]), ("long", qs[-1])):
+    for tag, q in (("short", qs[0]), ("mid", qs[len(qs) // 2]), ("long", qs[-2]), ("longest", qs[-1])):
         path = f"{out_prefix}_{tag}.png"
-        render(build_payload(q, size_for(q))).save(path)
-        print(path, len(q), "chars, size", size_for(q))
+        px, sp = size_for(q)
+        render(build_payload(q, px, sp)).save(path)
+        print(path, len(q), "chars, size", px, "spacing", sp)
 
 
 def parse(argv):
