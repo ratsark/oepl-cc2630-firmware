@@ -29,3 +29,6 @@ __pycache__/
 
 # Fonts fetched by tools/weather_display.py
 tools/weather_assets/
+
+# Your copy of Jack Handey's Deep Thoughts (tools/deep_thoughts_display.py)
+tools/deep_thoughts.txt
