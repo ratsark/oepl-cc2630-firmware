@@ -17,7 +17,7 @@ bootloader needs:
     TXD       ->  RXD      (crossover)
     RXD       ->  TXD      (crossover)
     TEST      ->  TI_DN    (D/L, DIO11: LOW at power-on enters the bootloader)
-    RESET     ->  (leave unconnected)
+    RESET     ->  RESET    (optional but recommended: pass --reset-wire, see below)
 
 If your flasher has no TEST wire, jumper the tag's TI_DN pad to GND by hand for
 the whole run and pass --manual-dl.
@@ -30,7 +30,8 @@ cc2538-bsl's CommandInterface and never touches DTR or the baud rate until the
 job is done.
 
 Sequence:
-  1. tag power OFF, TEST (D/L) LOW
+  1. tag power OFF for --off-time seconds (default 20: the board's capacitors
+     keep the chip running for a long time), TEST (D/L) LOW
   2. tag power ON   -> ROM sees DIO11 low, stays in the bootloader
   3. passthrough    -> sync, identify, erase, write, CRC32 verify, readback
   4. leave passthrough (DTR drop), tag power OFF
@@ -38,8 +39,17 @@ Sequence:
 Then pull the tag off the jig and put the batteries in.  DIO11 is no longer
 driven, so the ROM boots the application and you get the splash screen.
 
+Reset: the board's capacitors keep the CC2630 running for a long time after the
+VCC wires go low, so a short power-off is NOT a reset and D/L never gets sampled.
+Either wire the flasher's RESET wire (GPIO39) to the jig's RESET pad and pass
+--reset-wire (a 5 ms pulse borrowed from the flasher's CC1110 routine; retries are
+cheap), or accept the default --off-time 20 s hold with no reset wire.
+
+Verified 2026-09-23 on a stock TG-GR6000N with a v50 Tag-Flasher: --reset-wire,
+sync on the first attempt, erase+write+CRC in about a minute.
+
 Usage:
-  tools/flash_s2.py                                # flash binaries/Tag_FW_CC2630_TG-GR6000N.bin
+  tools/flash_s2.py --reset-wire                   # flash binaries/Tag_FW_CC2630_TG-GR6000N.bin
   tools/flash_s2.py -p /dev/cu.usbmodem01 FILE.bin
   tools/flash_s2.py --probe                        # bootloader handshake + chip/IEEE address, no write
   tools/flash_s2.py --read out.bin                 # dump the whole 128 KB flash (slow, ~1 min)
@@ -81,6 +91,8 @@ CMD_GET_VERSION = 1
 CMD_SET_POWER = 13
 CMD_SET_TESTP = 14
 CMD_PASS_THROUGH = 50
+CMD_SELECT_CC = 62      # CC1110 mode: side effect is a reset pulse on the RESET wire (GPIO39)
+CMD_RESET = 11          # in CC1110 mode: 5 ms low pulse on the RESET wire
 CMD_SELECT_PORT = 70
 PORT_EXTERNAL = 1
 
@@ -160,6 +172,13 @@ def main():
                     help="don't drive the TEST wire; you are holding TI_DN to GND yourself")
     ap.add_argument("--keep-power", action="store_true",
                     help="leave the tag powered by the S2 when done (default: power off)")
+    ap.add_argument("--reset-wire", action="store_true",
+                    help="the flasher's RESET wire (GPIO39) is on the tag's RESET pad: pulse it instead of "
+                         "waiting --off-time for the capacitors to drain, and retry the sync a few times")
+    ap.add_argument("--retries", type=int, default=5, help="sync attempts with --reset-wire (default 5)")
+    ap.add_argument("--off-time", type=float, default=20.0, metavar="SEC",
+                    help="seconds to hold tag power off before the bootloader power-on; the board's "
+                         "capacitors keep the CC2630 alive for many seconds (default 20)")
     args = ap.parse_args()
 
     port = args.port or find_port()
@@ -201,12 +220,27 @@ def main():
         print("TEST wire LOW (D/L held low)")
     else:
         print("Assuming TI_DN is jumpered to GND by hand")
-    time.sleep(0.5)
+    if args.reset_wire:
+        time.sleep(0.5)
+    else:
+        print("Tag power OFF for %.0f s (letting the board's capacitors drain)..." % args.off_time)
+        time.sleep(args.off_time)
 
     # 2. power on -> ROM bootloader
     s2_cmd(ser, CMD_SET_POWER, bytes([1]))
     print("Tag power ON via S2 VCC wires")
     time.sleep(0.3)
+
+    def reset_pulse():
+        # Entering CC1110 mode drives the RESET wire and ends with it high; CMD_RESET then
+        # pulses it low for 5 ms. CLK/MISO (GPIO33/35) wiggle too, so leave those unwired.
+        s2_cmd(ser, CMD_SELECT_CC)
+        s2_cmd(ser, CMD_RESET)
+        time.sleep(0.2)
+
+    if args.reset_wire:
+        reset_pulse()
+        print("RESET wire pulsed (D/L low)")
 
     # 3. passthrough
     s2_send(ser, CMD_PASS_THROUGH)
@@ -221,10 +255,20 @@ def main():
         ser.write_timeout = 5.0
 
         print("Syncing with ROM bootloader...")
-        try:
-            synced = cmd.sendSynch()
-        except bsl.CmdException:
-            synced = False
+        synced = False
+        for attempt in range(args.retries if args.reset_wire else 1):
+            try:
+                synced = cmd.sendSynch()
+            except bsl.CmdException:
+                synced = False
+            if synced or not args.reset_wire:
+                break
+            print("  no answer (attempt %d/%d), pulsing RESET and retrying" % (attempt + 1, args.retries))
+            leave_passthrough(ser)
+            reset_pulse()
+            s2_send(ser, CMD_PASS_THROUGH)
+            time.sleep(0.3)
+            ser.reset_input_buffer()
         if not synced:
             raise RuntimeError("no answer on synch. Check: batteries out, TI_DN low at power-on, "
                                "TXD/RXD crossed (try swapping), GND common.")
