@@ -66,6 +66,9 @@ oepl-cc2630-firmware/
 ├── reference/            Notes on the vendor dumps (binaries not distributed)
 └── tools/                Utility scripts
     ├── ap.py             AP helper: OTA push, image push, poll tag state, decode fault/diag reports
+    ├── welcome_cards.py  A one-off character card for each tag that joins an AP
+    ├── deep_thoughts_display.py  Random Jack Handey quote on a tag, as an HA automation
+    ├── flash_s2.py       UART bootloader flash through an OEPL S2-mini Tag-Flasher
     ├── ap_log.py         Stream the AP's live log (block requests, xfer complete, timeouts)
     ├── weather_display.py  Home Assistant weather layout: preview, push, install automation
     ├── flash.sh          UART bootloader flash script
@@ -73,6 +76,11 @@ oepl-cc2630-firmware/
     ├── dl_pin.sh         D/L pin (GPIO17) control
     └── start_fw.jlink    JLink firmware launch script
 ```
+
+## Access points
+
+[docs/SPAGHETTI_AP.md](docs/SPAGHETTI_AP.md): wiring and flashing a hand-wired
+ESP32-S3 + ESP32-C6 AP from this Mac, with the pitfalls met building the second one.
 
 ## Build Requirements
 
