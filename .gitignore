@@ -32,3 +32,6 @@ tools/weather_assets/
 
 # Your copy of Jack Handey's Deep Thoughts (tools/deep_thoughts_display.py)
 tools/deep_thoughts.txt
+
+# MACs already given a welcome card (tools/welcome_cards.py)
+tools/welcome_state.json
