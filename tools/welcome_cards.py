@@ -409,6 +409,8 @@ def cmd_watch(args):
             for t in all_tags():
                 if t["hwType"] == HW_AP_DISPLAY or t["mac"] in st["pushed"] or t["mac"] in skip:
                     continue
+                if not t.get("ver"):
+                    continue        # first packet sometimes arrives corrupt (wrong hwType, ver 0): wait for a clean one
                 card_for(t, st)
         except Exception as e:
             print(f"{time.strftime('%H:%M:%S')} AP hiccup: {e.__class__.__name__}: {e}")
