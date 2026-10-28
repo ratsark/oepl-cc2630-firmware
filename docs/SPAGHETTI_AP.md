@@ -98,6 +98,8 @@ know the original AP (set `OEPL_AP` to point tools at another one).
 
 ## Gotchas met on the way
 
+- **The COM port needs an A-to-C path.** Its connector lacks the CC resistors, so a C-to-C cable
+  gives it no power at all. A USB-C-to-A dongle plus an A-to-C cable works every time.
 - **Charge-only USB-C cables.** The first cable powered the board but the Mac
   saw no USB device at all (not even an unknown one, so not a driver problem).
   If `system_profiler SPUSBDataType` shows empty buses, swap the cable.
@@ -131,3 +133,4 @@ tags on the first spaghetti AP got theirs on 2026-09-29.
 | C6 #3              | 73:B3:1C   | radio flashed, spare                    |
 | S3 #4, #5, #6      | 6E:64, 74:74, 7F:6C | Yellow AP flashed 2026-10-04, for gift APs |
 | C6 #4, #5, #6      | 73:B2:CC, 73:BE:C8, 73:AF:54 | radio flashed 2026-10-04, for gift APs |
+| S3 #7-#12          | CB:C0, 32:30, 3A:80, 7D:A8, 7A:F0, 48:F0 | Yellow AP flashed 2026-10-28 |
