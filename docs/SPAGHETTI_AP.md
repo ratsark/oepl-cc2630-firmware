@@ -96,10 +96,36 @@ AP, so tags move between APs when their batteries are pulled and they come up
 nearer the other one. The Home Assistant integration and `tools/ap.py` only
 know the original AP (set `OEPL_AP` to point tools at another one).
 
+
+## Adding the 915 MHz radio (EByte E07-900M10 / CC1101)
+
+Module pin to the C6's printed label; the C6 radio image already includes the CC1101 driver and
+the Yellow AP build enables sub-GHz when the C6 reports the module.
+
+| Module | C6 |
+|--------|----|
+| SI / MOSI | 1 |
+| SO / MISO | 7 |
+| SCLK | 0 |
+| CSn | 4 |
+| GDO0 | 5 |
+| GDO2 | 6 |
+| VCC | 3V3 |
+| GND | G |
+
+Antenna on before power. `get_ap_config` shows `hasSubGhz: 1` when it is detected; set
+`subghzchannel` (203 = 915 MHz band, what the house AP uses) via `POST /save_apcfg`.
+
 ## Gotchas met on the way
 
 - **The COM port needs an A-to-C path.** Its connector lacks the CC resistors, so a C-to-C cable
   gives it no power at all. A USB-C-to-A dongle plus an A-to-C cable works every time.
+- **Power the C6 from 3V3, not 5V.** On the Hosyond S3 the 5 V header pin is not fed from the COM
+  connector, so a 5V-to-5V link leaves the C6 dead: the S3 boots, reports no radio and sits in
+  AP state 5 (failed). 3V3-to-3V3 works. The CC1101 module must also be on 3V3.
+- **Wi-Fi settings reset:** press and release RST, then hold BOOT for six seconds. The AP wipes
+  SSID/password/static IP and brings the `OpenEPaperLink` setup network back. Don't set a static
+  address in 192.168.4.x: that is the setup portal's own subnet.
 - **Charge-only USB-C cables.** The first cable powered the board but the Mac
   saw no USB device at all (not even an unknown one, so not a driver problem).
   If `system_profiler SPUSBDataType` shows empty buses, swap the cable.
