@@ -66,6 +66,7 @@ oepl-cc2630-firmware/
 ├── reference/            Notes on the vendor dumps (binaries not distributed)
 └── tools/                Utility scripts
     ├── ap.py             AP helper: OTA push, image push, poll tag state, decode fault/diag reports
+    ├── oepl_views.py     Hosted weather / Deep Thoughts images (docs/HOSTED_VIEWS.md)
     ├── welcome_cards.py  A one-off character card for each tag that joins an AP
     ├── deep_thoughts_display.py  Random Jack Handey quote on a tag, as an HA automation
     ├── flash_s2.py       UART bootloader flash through an OEPL S2-mini Tag-Flasher
@@ -76,6 +77,12 @@ oepl-cc2630-firmware/
     ├── dl_pin.sh         D/L pin (GPIO17) control
     └── start_fw.jlink    JLink firmware launch script
 ```
+
+## Hosted views
+
+[docs/HOSTED_VIEWS.md](docs/HOSTED_VIEWS.md): Berkeley and Oakland weather and a
+Deep Thought, served at `https://oepl.ratsark.com/` for any AP's Image URL mode,
+in 6", 2.9" and 1.6" sizes. Rendered by `tools/oepl_views.py`.
 
 ## Access points
 

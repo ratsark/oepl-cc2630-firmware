@@ -24,7 +24,7 @@ every QUOTE_HOURS so every fetch in that window sees the same quote.
 
 Config via environment (or ~/secrets.toml [cloudflare] when run on the dev Mac):
     R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET (default oepl),
-    PUBLIC_BASE (default https://pub-27b52fd49cbf48ebaf32761165fe1614.r2.dev)
+    PUBLIC_BASE (default https://oepl.ratsark.com)
 """
 import datetime as dt
 import hashlib
@@ -41,7 +41,7 @@ ASSET_URL = ("https://raw.githubusercontent.com/OpenEPaperLink/Home_Assistant_In
              "main/custom_components/open_epaper_link/imagegen/assets/")
 TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
 QUOTE_HOURS = 4
-PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://pub-27b52fd49cbf48ebaf32761165fe1614.r2.dev").rstrip("/")
+PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://oepl.ratsark.com").rstrip("/")
 
 PLACES = {"berkeley": ("Berkeley", 37.8716, -122.2727), "oakland": ("Oakland", 37.8044, -122.2712)}
 BLACK, WHITE, RED, YELLOW = (0, 0, 0), (255, 255, 255), (255, 0, 0), (255, 255, 0)
