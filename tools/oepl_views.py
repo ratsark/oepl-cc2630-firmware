@@ -269,24 +269,21 @@ def weather_29in(name, w):
 
 
 def weather_16in(name, w):
+    # Deliberately sparse: the panel is 200 px square. City and day on top,
+    # one big icon and the temperature, today's high and low. Nothing else.
     c = Canvas(200, 200, accent2=YELLOW)
     c.line(0, 2, 200, 2, width=4, color="red")
-    c.text(name, 6, 10, 14, anchor="la", color="red", font="ppb.ttf")
-    c.text(w["now"].strftime("%a %-d"), 194, 10, 14, anchor="ra", font="ppb.ttf")
+    c.text(name, 8, 12, 16, anchor="la", color="red", font="ppb.ttf")
+    c.text(w["now"].strftime("%a %-d"), 192, 12, 16, anchor="ra", font="ppb.ttf")
     ic, txt = wmo(w["code"], not w["day"])
-    c.icon(ic, 46, 72, 72, color="yellow" if ic in ("weather-sunny", "weather-partly-cloudy") else "black")
-    c.text("%d°" % round(w["temp"]), 194, 92, 58, anchor="rs", font="ppb.ttf")
-    c.text(txt, 100, 112, 15, anchor="mm", max_width=190)
+    c.icon(ic, 46, 96, 82, color="yellow" if ic in ("weather-sunny", "weather-partly-cloudy") else "black")
+    c.text("%d°" % round(w["temp"]), 194, 118, 66, anchor="rs", font="ppb.ttf")
+    c.text(txt, 100, 144, 17, anchor="mm", max_width=188)
     today = w["daily"][0]
-    c.icon("arrow-up-bold", 36, 136, 14, color="red"); c.text("%d°" % round(today["hi"]), 48, 136, 18, anchor="lm", color="red", font="ppb.ttf")
-    c.icon("arrow-down-bold", 108, 136, 14); c.text("%d°" % round(today["lo"]), 120, 136, 18, anchor="lm", font="ppb.ttf")
-    c.line(6, 152, 194, 152)
-    for i, x in ((1, 50), (2, 150)):
-        dday = w["daily"][i]
-        c.text(dday["date"].strftime("%a"), x, 158, 13, anchor="mt", font="ppb.ttf")
-        c.icon(wmo(dday["code"])[0], x - 24, 184, 26)
-        c.text("%d°" % round(dday["hi"]), x - 6, 178, 15, anchor="lm", color="red", font="ppb.ttf")
-        c.text("%d°" % round(dday["lo"]), x - 6, 193, 13, anchor="lm")
+    c.icon("arrow-up-bold", 44, 178, 18, color="red")
+    c.text("%d°" % round(today["hi"]), 58, 178, 24, anchor="lm", color="red", font="ppb.ttf")
+    c.icon("arrow-down-bold", 116, 178, 18)
+    c.text("%d°" % round(today["lo"]), 130, 178, 24, anchor="lm", font="ppb.ttf")
     return c
 
 
