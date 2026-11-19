@@ -22,8 +22,8 @@
 #include "rtt.h"
 #include <string.h>
 
-#define DISP_W  600
-#define DISP_H  448
+#define DISP_W  DISPLAY_WIDTH
+#define DISP_H  DISPLAY_HEIGHT
 #define ROW_BYTES (DISP_W / 2)  // 300 bytes per 4bpp row
 
 // 4bpp color nibbles
@@ -53,10 +53,25 @@
 #define ACCENT_Y1   122
 
 // Red divider above footer: rows 370-371, cols 100-499
+#if DISP_H >= 448
 #define DIVIDER_Y0  370
 #define DIVIDER_Y1  372
-#define DIVIDER_X0  100
-#define DIVIDER_X1  500
+#define TXT_Y_MAC   166
+#define TXT_Y_BAT   234
+#define TXT_Y_AP    302
+#define TXT_Y_FAULT 340
+#define TXT_Y_FW    404
+#else   // 384 rows: same layout, info lines closer together
+#define DIVIDER_Y0  328
+#define DIVIDER_Y1  330
+#define TXT_Y_MAC   148
+#define TXT_Y_BAT   200
+#define TXT_Y_AP    252
+#define TXT_Y_FAULT 290
+#define TXT_Y_FW    346
+#endif
+#define DIVIDER_X0  (DISP_W / 6)
+#define DIVIDER_X1  (DISP_W - DISP_W / 6)
 
 // 4x4 Bayer ordered dither matrix (threshold values 0-15)
 static const uint8_t bayer4[4][4] = {
@@ -167,7 +182,7 @@ static void overlay_text(uint16_t y, uint8_t *row_buf,
 static inline void apply_side_borders(uint8_t *row_buf)
 {
     row_buf[0] = FILL_BLACK;
-    row_buf[299] = FILL_BLACK;
+    row_buf[ROW_BYTES - 1] = FILL_BLACK;
 }
 
 // Render a banner row with dithered red-to-white gradient.
@@ -201,7 +216,7 @@ static void render_dithered_banner_row(uint16_t y, uint8_t *row_buf)
         row_buf[x / 2] = (c0 << 4) | c1;
     }
 
-    row_buf[299] = FILL_BLACK;  // right border
+    row_buf[ROW_BYTES - 1] = FILL_BLACK;  // right border
 }
 
 // --- Main splash renderer ---
@@ -249,12 +264,12 @@ void splash_display(const uint8_t *mac, uint16_t battery_mv, int8_t temp_c,
     // info text at 3x for legibility, evenly spaced in white area
     text_item_t texts[NUM_TEXTS] = {
         [TXT_TITLE] = { 26,  4, COL_WHITE, "OpenEPaperLink",    0, 0},
-        [TXT_MODEL] = { 88,  3, COL_WHITE, "CC2630 6.0\" BWR",  0, 0},
-        [TXT_MAC]   = {166,  3, COL_BLACK, mac_str,              0, 0},
-        [TXT_BAT]   = {234,  3, COL_BLACK, bat_temp_str,         0, 0},
-        [TXT_AP]    = {302,  3, ap_found ? COL_BLACK : COL_RED, ap_str, 0, 0},
-        [TXT_FW]    = {404,  2, COL_BLACK, "FW " TAG_FW_VERSION_STR, 0, 0},
-        [TXT_FAULT] = {340,  2, COL_RED,   fault_str ? fault_str : "", 0, 0},
+        [TXT_MODEL] = { 88,  3, COL_WHITE, OEPL_MODEL_STR,       0, 0},
+        [TXT_MAC]   = {TXT_Y_MAC,   3, COL_BLACK, mac_str,      0, 0},
+        [TXT_BAT]   = {TXT_Y_BAT,   3, COL_BLACK, bat_temp_str, 0, 0},
+        [TXT_AP]    = {TXT_Y_AP,    3, ap_found ? COL_BLACK : COL_RED, ap_str, 0, 0},
+        [TXT_FW]    = {TXT_Y_FW,    2, COL_BLACK, "FW " TAG_FW_VERSION_STR, 0, 0},
+        [TXT_FAULT] = {TXT_Y_FAULT, 2, COL_RED,   fault_str ? fault_str : "", 0, 0},
     };
     for (uint8_t i = 0; i < NUM_TEXTS; i++)
         precompute_text(&texts[i]);
@@ -268,7 +283,7 @@ void splash_display(const uint8_t *mac, uint16_t battery_mv, int8_t temp_c,
     { uint8_t c = 0x10; oepl_hw_spi_send_raw(&c, 1); }
     oepl_hw_gpio_set(15, true);   // DC = data
 
-    // Stream 448 rows
+    // Stream DISP_H rows
     uint8_t row_buf[ROW_BYTES];
 
     for (uint16_t y = 0; y < DISP_H; y++) {

@@ -10,6 +10,19 @@ Custom open-source OEPL firmware for the Solum TG-GR6000N 6.0" BWR e-paper tag.
 - **Model**: Solum TG-GR6000N (hwType 0x35)
 - **MAC**: 00:12:4B:00:18:18:80:B0
 
+### Also builds for: Solum TG-GR7500C (7.5")
+
+Same board design as the TG-GR6000N (same CC2630F128, pin map, UC8159
+controller and CCFG); only the panel differs: 7.5" 640x384 BWR. Build with
+`make TAG=TG-GR7500C`. The tag reports hwType 0x05, the AP's existing 640x384
+BWR tag type ("M2 7.4""), which uses the same image format (2 bpp, no
+rotation, zlib). Panel values were read from the stock 7.5" firmware
+(TRES 02 80 01 80, PSR CB 08; built with 0xCF, the same SHL correction the
+6.0" needs). Tested: splash, check-in and zlib BWR images from the AP.
+
+Don't start a firmware update for this tag from the AP: hwType 0x05 is shared
+with the Marvell 88MZ100 M2 7.4" tags, whose OTA image would not run on a CC2630.
+
 ## Current Status
 
 **Fully working end-to-end.** The tag receives images from the OEPL AP and displays them.
@@ -105,7 +118,8 @@ See `docs/BUILD_STATUS.md` for details.
 ## Building
 
 ```bash
-make                    # Build firmware
+make                    # Build firmware (TG-GR6000N)
+make TAG=TG-GR7500C     # Build firmware for the 7.5" TG-GR7500C
 make size               # Show memory usage
 make clean              # Clean build artifacts
 ```

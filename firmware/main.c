@@ -951,8 +951,8 @@ static bool download_and_display(struct AvailDataInfo *info)
     uint8_t data_type = info->dataType;
     uint16_t width = DISPLAY_WIDTH_600X448;
     uint16_t height = DISPLAY_HEIGHT_600X448;
-    uint16_t row_bytes = width / 8;           // 75 bytes per 1bpp row
-    uint32_t plane_size = (uint32_t)row_bytes * height;  // 33,600 bytes
+    uint16_t row_bytes = width / 8;           // 75 (6.0") / 80 (7.5") bytes per 1bpp row
+    uint32_t plane_size = (uint32_t)row_bytes * height;  // 33,600 (6.0") / 30,720 (7.5") bytes
     bool has_red = (data_type == 0x21) && (data_size >= plane_size * 2);
     dl_failed_blocks = 0;
 #ifdef DIAG_TELEMETRY
@@ -978,9 +978,9 @@ static bool download_and_display(struct AvailDataInfo *info)
     epd_begin_pixels();
 
     // Stream rows to display
-    uint8_t bw_line[75];
-    uint8_t red_line[75];
-    uint8_t row_4bpp[300];
+    uint8_t bw_line[DISPLAY_WIDTH / 8];
+    uint8_t red_line[DISPLAY_WIDTH / 8];
+    uint8_t row_4bpp[DISPLAY_WIDTH / 2];
 
     for (uint16_t y = 0; y < height; y++) {
         // Abort at the first failed block: a partial image is never refreshed,
@@ -1009,7 +1009,7 @@ static bool download_and_display(struct AvailDataInfo *info)
         }
 
         // Send row to display
-        oepl_hw_spi_send_raw(row_4bpp, 300);
+        oepl_hw_spi_send_raw(row_4bpp, sizeof(row_4bpp));
 
         // Progress every 64 rows
         if ((y & 0x3F) == 0) {

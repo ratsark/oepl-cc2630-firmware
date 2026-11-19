@@ -14,9 +14,34 @@
 //                              Macros and Typedefs
 // -----------------------------------------------------------------------------
 
-// Display parameters
-#define DISPLAY_WIDTH_600X448   600
-#define DISPLAY_HEIGHT_600X448  448
+// Panel selection. The UC8159 driver serves two Solum CC2630 tags that share
+// the board design (same pins, same controller) and differ only in the panel:
+//   TG-GR6000N  6.0"  600x448 BWR  (default, hwType 0x35)
+//   TG-GR7500C  7.5"  640x384 BWR  (make TAG=TG-GR7500C, reports hwType 0x05,
+//                                   the AP's 640x384 BWR "M2 7.4"" tag type)
+// UC8159_PSR is the first Panel Setting byte. The stock values are 0xC7 (6.0")
+// and 0xCB (7.5"); the 6.0" needs SHL cleared (0xC3) for OEPL's left-to-right
+// pixel order, so the 7.5" gets the same correction (SHL set, 0xCF).
+#if defined(OEPL_DISPLAY_UC8159_640X384)
+#define DISPLAY_WIDTH           640
+#define DISPLAY_HEIGHT          384
+#ifndef UC8159_PSR
+#define UC8159_PSR              0xCF
+#endif
+#define OEPL_HW_TYPE            0x05  // SOLUM_M2_BWR_75 (640x384 BWR)
+#define OEPL_MODEL_STR          "CC2630 7.5\" BWR"
+#else
+#define DISPLAY_WIDTH           600
+#define DISPLAY_HEIGHT          448
+#ifndef UC8159_PSR
+#define UC8159_PSR              0xC3
+#endif
+#define OEPL_HW_TYPE            0x35  // SOLUM_M3_BWR_60
+#define OEPL_MODEL_STR          "CC2630 6.0\" BWR"
+#endif
+// Old names, kept so existing code reads the same
+#define DISPLAY_WIDTH_600X448   DISPLAY_WIDTH
+#define DISPLAY_HEIGHT_600X448  DISPLAY_HEIGHT
 #define DISPLAY_BPP             4    // 4 bits per pixel (BWR: 0x0=black, 0x3=white, 0x4=red)
 
 // UC8159 Commands (from stock firmware analysis)
