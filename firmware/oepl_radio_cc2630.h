@@ -28,7 +28,8 @@
 #define XFER_COMPLETE_TRIES           5
 
 // Hardware type for 6" BWR (from oepl-definitions.h)
-#define HW_TYPE                 0x35  // SOLUM_M3_BWR_60
+#include "drivers/oepl_display_driver_uc8159_600x448.h"
+#define HW_TYPE                 OEPL_HW_TYPE  // 0x35 (6.0") or 0x05 (7.5")
 
 // Block transfer constants
 #define BLOCK_PART_DATA_SIZE    99

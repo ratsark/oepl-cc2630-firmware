@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nathan Bigelow
 // -----------------------------------------------------------------------------
-//  UC8159 600x448 E-Paper Display Driver for TG-GR6000N
+//  UC8159 E-Paper Display Driver for TG-GR6000N (600x448) and TG-GR7500C (640x384)
 //  v31b: Working display driver with OTP waveform load
 //
 //  4bpp BWR color mapping (per nibble):
@@ -196,7 +196,7 @@ void uc8159_init(void)
 
     // 5. Register configuration (stock firmware values)
     // Panel Setting (stock=0xC7, fix HM: SHL=0 for correct left-to-right source shift)
-    { uint8_t d[] = {0xC3, 0x08}; epd_write(0x00, d, 2); }
+    { uint8_t d[] = {UC8159_PSR, 0x08}; epd_write(0x00, d, 2); }
     // Power Setting
     { uint8_t d[] = {0x37, 0x00, 0x05, 0x05}; epd_write(0x01, d, 4); }
     // Power Off Sequence
@@ -211,8 +211,9 @@ void uc8159_init(void)
     { uint8_t d[] = {0x77}; epd_write(0x50, d, 1); }
     // TCON
     { uint8_t d[] = {0x22}; epd_write(0x60, d, 1); }
-    // Resolution: 600x448
-    { uint8_t d[] = {0x02, 0x58, 0x01, 0xC0}; epd_write(0x61, d, 4); }
+    // Resolution (TRES): 600x448 = 02 58 01 C0, 640x384 = 02 80 01 80
+    { uint8_t d[] = {DISPLAY_WIDTH >> 8, DISPLAY_WIDTH & 0xFF,
+                     DISPLAY_HEIGHT >> 8, DISPLAY_HEIGHT & 0xFF}; epd_write(0x61, d, 4); }
     // VCOM DC (stock = 0x1F, was 0x1E)
     { uint8_t d[] = {0x1F}; epd_write(0x82, d, 1); }
     // Flash mode = 0x00 (ensure not in flash pass-through)

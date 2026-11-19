@@ -7,6 +7,7 @@
 
 #include "oepl_hw_abstraction_cc2630.h"
 #include "rtt.h"
+#include "drivers/oepl_display_driver_uc8159_600x448.h"
 
 // TI driverlib
 #include "ssi.h"
@@ -412,13 +413,13 @@ void oepl_hw_enter_deepsleep(void)
 
 uint8_t oepl_hw_get_hwid(void)
 {
-    return 0x35;  // SOLUM_M3_BWR_60
+    return OEPL_HW_TYPE;
 }
 
 bool oepl_hw_get_screen_properties(size_t* x, size_t* y, size_t* bpp)
 {
-    *x = 600;
-    *y = 448;
+    *x = DISPLAY_WIDTH;
+    *y = DISPLAY_HEIGHT;
     *bpp = 1;
     return true;
 }

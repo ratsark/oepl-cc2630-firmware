@@ -1,7 +1,18 @@
 # Makefile for OpenEPaperLink CC2630 Firmware (TG-GR6000N)
 
+# Target tag: TG-GR6000N (6.0" 600x448, default) or TG-GR7500C (7.5" 640x384)
+#   make TAG=TG-GR7500C
+TAG ?= TG-GR6000N
+ifeq ($(TAG),TG-GR6000N)
+DISPLAY_DEFINE = -DOEPL_DISPLAY_UC8159_600X448
+else ifeq ($(TAG),TG-GR7500C)
+DISPLAY_DEFINE = -DOEPL_DISPLAY_UC8159_640X384
+else
+$(error Unknown TAG=$(TAG), use TG-GR6000N or TG-GR7500C)
+endif
+
 # Project name
-PROJECT = Tag_FW_CC2630_TG-GR6000N
+PROJECT = Tag_FW_CC2630_$(TAG)
 
 # Toolchain
 TOOLCHAIN_PREFIX = arm-none-eabi-
@@ -56,7 +67,7 @@ INCLUDES = \
 DEFINES = \
 	-DCC2630 \
 	-DOEPL_TARGET_CC2630 \
-	-DOEPL_DISPLAY_UC8159_600X448
+	$(DISPLAY_DEFINE)
 
 # make DIAG=1: after each image download the next checkin reports download
 # diagnostics in the LQI/temperature/battery fields instead of telemetry
